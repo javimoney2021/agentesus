@@ -1,0 +1,190 @@
+import os
+import io
+import discord
+from discord import app_commands
+from discord.ext import commands
+import aiosqlite
+from dotenv import load_dotenv
+
+load_dotenv()
+
+TOKEN = os.getenv("DISCORD_TOKEN")
+GUILD_ID = os.getenv("GUILD_ID")
+STAFF_ROLES = [r.strip() for r in os.getenv("STAFF_ROLES", "Admin,Moderador,Mod").split(",") if r.strip()]
+
+DB_FILE = "registros.db"
+
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ---------- BASE DE DATOS ----------
+async def init_db():
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS registros (
+                user_id INTEGER PRIMARY KEY,
+                discord_tag TEXT NOT NULL,
+                nickname TEXT NOT NULL,
+                external_id TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.commit()
+
+async def upsert_registro(user, nickname, external_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        await db.execute("""
+            INSERT INTO registros (user_id, discord_tag, nickname, external_id)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                discord_tag=excluded.discord_tag,
+                nickname=excluded.nickname,
+                external_id=excluded.external_id,
+                updated_at=CURRENT_TIMESTAMP
+        """, (user.id, str(user), nickname, external_id))
+        await db.commit()
+
+async def get_registro(user_id):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("""
+            SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
+            FROM registros WHERE user_id=?
+        """, (user_id,)) as cur:
+            return await cur.fetchone()
+
+async def get_all_registros():
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("""
+            SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
+            FROM registros ORDER BY updated_at DESC
+        """) as cur:
+            return await cur.fetchall()
+
+async def get_by_external_id(external_id: str):
+    async with aiosqlite.connect(DB_FILE) as db:
+        async with db.execute("""
+            SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
+            FROM registros
+            WHERE external_id = ?
+            ORDER BY updated_at DESC
+        """, (external_id,)) as cur:
+            return await cur.fetchall()
+
+
+# ---------- PERMISOS ----------
+def is_staff(interaction):
+    perms = interaction.user.guild_permissions
+    if perms.administrator or perms.manage_guild or perms.moderate_members:
+        return True
+    for role in interaction.user.roles:
+        if role.name in STAFF_ROLES:
+            return True
+    return False
+
+def require_staff():
+    async def predicate(interaction):
+        if not is_staff(interaction):
+            await interaction.response.send_message("⛔ No tienes permisos.", ephemeral=True)
+            return False
+        return True
+    return app_commands.check(predicate)
+
+# ---------- EVENTO ----------
+@bot.event
+async def on_ready():
+    await init_db()
+
+    try:
+        if GUILD_ID:
+            guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print("✅ Comandos sincronizados en tu servidor")
+        else:
+            await bot.tree.sync()
+            print("✅ Comandos sincronizados globalmente")
+    except Exception as e:
+        print("❌ Error sincronizando comandos:", e)
+
+    print(f"🤖 Bot conectado como {bot.user}")
+
+# ---------- COMANDOS ----------
+@bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
+async def registrar(interaction, nickname: str, external_id: str):
+    await upsert_registro(interaction.user, nickname.strip(), external_id.strip())
+    await interaction.response.send_message(
+        f"✅ Registro guardado\nNick: `{nickname}`\nID: `{external_id}`",
+        ephemeral=True
+    )
+
+@bot.tree.command(name="consultar", description="(Admin/Mod) Consultar registro")
+@require_staff()
+async def consultar(interaction, usuario: discord.Member):
+    row = await get_registro(usuario.id)
+    if not row:
+        return await interaction.response.send_message("No registrado.", ephemeral=True)
+
+    _, tag, nick, ext_id, created, updated = row
+    embed = discord.Embed(title="📄 Registro", color=discord.Color.blue())
+    embed.set_thumbnail(url=usuario.display_avatar.url)
+    embed.add_field(name="Usuario", value=tag, inline=False)
+    embed.add_field(name="Nick", value=nick, inline=True)
+    embed.add_field(name="ID", value=ext_id, inline=True)
+    embed.set_footer(text=f"Actualizado: {updated}")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+@bot.tree.command(name="userid", description="(Admin/Mod) Busca a qué usuario pertenece un ID Espacial")
+@app_commands.describe(id_espacial="ID Espacial a buscar")
+@require_staff()
+async def userid(interaction: discord.Interaction, id_espacial: str):
+    id_espacial = id_espacial.strip()
+
+    rows = await get_by_external_id(id_espacial)
+    if not rows:
+        return await interaction.response.send_message(
+            f"ℹ️ No encontré ningún usuario registrado con **ID Espacial** `{id_espacial}`.",
+            ephemeral=True
+        )
+
+    # Si por alguna razón hay más de un usuario con el mismo ID, los listamos
+    embed = discord.Embed(
+        title="🔎 Resultado de búsqueda por ID Espacial",
+        description=f"ID Espacial: `{id_espacial}`\nCoincidencias: **{len(rows)}**",
+        color=discord.Color.blurple()
+    )
+
+    for user_id, discord_tag, nickname, external_id, created_at, updated_at in rows[:10]:
+        embed.add_field(
+            name=f"{discord_tag}",
+            value=f"Nick: `{nickname}`\nDiscord ID: `{user_id}`\nActualizado: `{updated_at}`",
+            inline=False
+        )
+
+    if len(rows) > 10:
+        embed.set_footer(text="Mostrando solo las primeras 10 coincidencias.")
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="editar", description="(Admin/Mod) Editar registro")
+@require_staff()
+async def editar(interaction, usuario: discord.Member, nickname: str, external_id: str):
+    await upsert_registro(usuario, nickname.strip(), external_id.strip())
+    await interaction.response.send_message("✏️ Registro actualizado.", ephemeral=True)
+
+@bot.tree.command(name="userbase", description="(Admin/Mod) Ver todos los registros")
+@require_staff()
+async def userbase(interaction):
+    rows = await get_all_registros()
+    if not rows:
+        return await interaction.response.send_message("No hay registros.", ephemeral=True)
+
+    text = "\n".join([f"{r[1]} | Nick={r[2]} | ID={r[3]}" for r in rows])
+    await interaction.response.send_message(f"```{text[:1900]}```", ephemeral=True)
+
+if not TOKEN:
+    raise RuntimeError("Falta DISCORD_TOKEN en .env")
+
+bot.run(TOKEN)
