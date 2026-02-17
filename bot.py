@@ -16,7 +16,7 @@ STAFF_ROLES = [r.strip() for r in os.getenv("STAFF_ROLES", "Admin,Moderador,Mod"
 OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
 # Usamos la variable DATABASE_URL que es proporcionada por Railway
-DATABASE_URL = os.getenv("DATABASE_URL")
+DATABASE_URL = os.getenv('Postgres.DATABASE_URL')
 
 DB_FILE = "registros.db"
 # Cada 5 mensajes -> 1 punto contabilizado
