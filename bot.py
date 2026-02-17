@@ -6,11 +6,9 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 import asyncpg  # Usamos asyncpg para conectar con PostgreSQL
-=======
 import aiosqlite
 from dotenv import load_dotenv
 
-load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
@@ -21,7 +19,6 @@ OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 DB_FILE = "registros.db"
-
 # Cada 5 mensajes -> 1 punto contabilizado
 COOLDOWN_MESSAGES = 4
 
@@ -50,6 +47,7 @@ async def init_db():
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
 
     await conn.execute("""
         CREATE TABLE IF NOT EXISTS permitted_channels (
@@ -197,7 +195,7 @@ async def get_by_external_id(external_id: str):
     """, external_id)
     await conn.close()
     return rows
-=======
+
     async with aiosqlite.connect(DB_FILE) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS registros (
@@ -210,130 +208,144 @@ async def get_by_external_id(external_id: str):
             )
         """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS permitted_channels (
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                PRIMARY KEY (guild_id, channel_id)
-            )
-        """)
 
-        await db.execute("""
-            CREATE TABLE IF NOT EXISTS msg_counts (
-                guild_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                counted INTEGER NOT NULL DEFAULT 0,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                PRIMARY KEY (guild_id, user_id)
-            )
-        """)
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS permitted_channels (
+            guild_id BIGINT NOT NULL,
+            channel_id BIGINT NOT NULL,
+            PRIMARY KEY (guild_id, channel_id)
+        )
+    """)
 
-        await db.commit()
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS msg_counts (
+            guild_id BIGINT NOT NULL,
+            user_id BIGINT NOT NULL,
+            counted INT NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            PRIMARY KEY (guild_id, user_id)
+        )
+    """)
+
+    await conn.close()
 
 async def upsert_registro(user, nickname, external_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            INSERT INTO registros (user_id, discord_tag, nickname, external_id)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(user_id) DO UPDATE SET
-                discord_tag=excluded.discord_tag,
-                nickname=excluded.nickname,
-                external_id=excluded.external_id,
-                updated_at=CURRENT_TIMESTAMP
-        """, (user.id, str(user), nickname, external_id))
-        await db.commit()
+    # Usamos asyncpg para insertar o actualizar registros en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("""
+        INSERT INTO registros (user_id, discord_tag, nickname, external_id)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT(user_id) DO UPDATE SET
+            discord_tag = excluded.discord_tag,
+            nickname = excluded.nickname,
+            external_id = excluded.external_id,
+            updated_at = CURRENT_TIMESTAMP
+    """, user.id, str(user), nickname, external_id)
+    await conn.close()
 
 async def get_registro(user_id):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("""
-            SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
-            FROM registros WHERE user_id=?
-        """, (user_id,)) as cur:
-            return await cur.fetchone()
+    # Usamos asyncpg para consultar un registro en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow("""
+        SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
+        FROM registros WHERE user_id=$1
+    """, user_id)
+    await conn.close()
+    return row
 
 async def get_all_registros():
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("""
-            SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
-            FROM registros ORDER BY updated_at DESC
-        """) as cur:
-            return await cur.fetchall()
+    # Obtener todos los registros de la base de datos PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("""
+        SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
+        FROM registros ORDER BY updated_at DESC
+    """)
+    await conn.close()
+    return rows
 
 async def delete_registro(user_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute(
-            "DELETE FROM registros WHERE user_id = ?",
-            (user_id,)
-        )
-        await db.commit()
+    # Eliminar un registro de PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("DELETE FROM registros WHERE user_id=$1", user_id)
+    await conn.close()
 
 async def permit_channel(guild_id: int, channel_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            INSERT OR IGNORE INTO permitted_channels (guild_id, channel_id)
-            VALUES (?, ?)
-        """, (guild_id, channel_id))
-        await db.commit()
+    # Permitir un canal en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("""
+        INSERT OR IGNORE INTO permitted_channels (guild_id, channel_id)
+        VALUES ($1, $2)
+    """, guild_id, channel_id)
+    await conn.close()
 
 async def unpermit_channel(guild_id: int, channel_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            DELETE FROM permitted_channels
-            WHERE guild_id = ? AND channel_id = ?
-        """, (guild_id, channel_id))
-        await db.commit()
+    # Desautorizar un canal en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("""
+        DELETE FROM permitted_channels
+        WHERE guild_id=$1 AND channel_id=$2
+    """, guild_id, channel_id)
+    await conn.close()
 
 
 async def is_channel_permitted(guild_id: int, channel_id: int) -> bool:
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("""
-            SELECT 1 FROM permitted_channels
-            WHERE guild_id=? AND channel_id=?
-        """, (guild_id, channel_id)) as cur:
-            return await cur.fetchone() is not None
+    # Verificar si un canal está autorizado en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow("""
+        SELECT 1 FROM permitted_channels
+        WHERE guild_id=$1 AND channel_id=$2
+    """, guild_id, channel_id)
+    await conn.close()
+    return row is not None
 
 async def reset_table(guild_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("DELETE FROM msg_counts WHERE guild_id=?", (guild_id,))
-        await db.commit()
+    # Resetear la tabla de mensajes para un servidor en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("DELETE FROM msg_counts WHERE guild_id=$1", guild_id)
+    await conn.close()
 
 async def reset_user_count(guild_id: int, user_id: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("DELETE FROM msg_counts WHERE guild_id=? AND user_id=?", (guild_id, user_id))
-        await db.commit()
+    # Resetear el contador de mensajes para un usuario en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("DELETE FROM msg_counts WHERE guild_id=$1 AND user_id=$2", guild_id, user_id)
+    await conn.close()
 
 async def add_counted_points(guild_id: int, user_id: int, points: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        await db.execute("""
-            INSERT INTO msg_counts (guild_id, user_id, counted)
-            VALUES (?, ?, ?)
-            ON CONFLICT(guild_id, user_id) DO UPDATE SET
-                counted = counted + excluded.counted,
-                updated_at = CURRENT_TIMESTAMP
-        """, (guild_id, user_id, points))
-        await db.commit()
+    # Agregar puntos a un usuario en PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    await conn.execute("""
+        INSERT INTO msg_counts (guild_id, user_id, counted)
+        VALUES ($1, $2, $3)
+        ON CONFLICT(guild_id, user_id) DO UPDATE SET
+            counted = counted + excluded.counted,
+            updated_at = CURRENT_TIMESTAMP
+    """, guild_id, user_id, points)
+    await conn.close()
 
 async def get_leaderboard(guild_id: int, limit: int, offset: int):
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("""
-            SELECT user_id, counted
-            FROM msg_counts
-            WHERE guild_id=?
-            ORDER BY counted DESC, updated_at DESC
-            LIMIT ? OFFSET ?
-        """, (guild_id, limit, offset)) as cur:
-            return await cur.fetchall()
+    # Obtener el leaderboard desde PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("""
+        SELECT user_id, counted
+        FROM msg_counts
+        WHERE guild_id=$1
+        ORDER BY counted DESC, updated_at DESC
+        LIMIT $2 OFFSET $3
+    """, guild_id, limit, offset)
+    await conn.close()
+    return rows
 
 async def get_leaderboard_total(guild_id: int) -> int:
-    async with aiosqlite.connect(DB_FILE) as db:
-        async with db.execute("""
-            SELECT COUNT(*) FROM msg_counts WHERE guild_id=?
-        """, (guild_id,)) as cur:
-            row = await cur.fetchone()
-            return int(row[0]) if row else 0
-
+    # Obtener el total de registros en el leaderboard
+    conn = await asyncpg.connect(DATABASE_URL)
+    row = await conn.fetchrow("""
+        SELECT COUNT(*) FROM msg_counts WHERE guild_id=$1
+    """, guild_id)
+    await conn.close()
+    return int(row[0]) if row else 0
 
 async def get_by_external_id(external_id: str):
+
     async with aiosqlite.connect(DB_FILE) as db:
         async with db.execute("""
             SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
@@ -343,7 +355,18 @@ async def get_by_external_id(external_id: str):
         """, (external_id,)) as cur:
             return await cur.fetchall()
 
->>>>>>> 0898fcb (Subiendo bot completo desde Zorin)
+
+    # Obtener registros por ID espacial desde PostgreSQL
+    conn = await asyncpg.connect(DATABASE_URL)
+    rows = await conn.fetch("""
+        SELECT user_id, discord_tag, nickname, external_id, created_at, updated_at
+        FROM registros
+        WHERE external_id=$1
+        ORDER BY updated_at DESC
+    """, external_id)
+    await conn.close()
+    return rows
+
 
 # ---------- PERMISOS ----------
 def is_staff(interaction):
@@ -402,7 +425,7 @@ async def on_message(message: discord.Message):
         await add_counted_points(message.guild.id, message.author.id, 1)
 
     await bot.process_commands(message)
-        
+
 
 
 async def dm_owner(text: str):

@@ -1,0 +1,5 @@
+DATABASE_URL=postgresql://postgres:JlDIJPgvGqmOawMbWJjuTIgWficfdYHi@postgres.railway.internal:5432/railway
+GUILD_ID=980073134411644939
+STAFF_ROLES=Admin,Equipo de Eventos,Coordinador-ES,Junior
+OWNER_ID=982462651479244860
+
