@@ -1,4 +1,4 @@
-print("💧 [DEBUG] ESTE bot.py SE ESTÁ EJECUTANDO 💧")
+print("✅ [DEBUG] ESTE bot.py SE ESTÁ EJECUTANDO ✅")
 
 import os
 import io
@@ -29,7 +29,9 @@ intents = discord.Intents.default()
 intents.guilds = True
 intents.messages = True
 intents.message_content = True
-bot = commands.Bot(command_prefix=None, intents=intents)
+
+# CAMBIO: Usamos "_" como prefijo para evitar el error de NoneType y conflictos
+bot = commands.Bot(command_prefix="_", intents=intents)
 
 # Pool global para evitar saturar conexiones en Railway
 bot_pool = None
@@ -99,6 +101,8 @@ async def unpermit_channel(guild_id: int, channel_id: int):
         await conn.execute("DELETE FROM permitted_channels WHERE guild_id=$1 AND channel_id=$2", guild_id, channel_id)
 
 async def is_channel_permitted(guild_id: int, channel_id: int) -> bool:
+    # Verificación de seguridad para evitar el error de AttributeError
+    if bot_pool is None: return False
     async with bot_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT 1 FROM permitted_channels WHERE guild_id=$1 AND channel_id=$2", guild_id, channel_id)
         return row is not None
@@ -112,6 +116,8 @@ async def reset_user_count(guild_id: int, user_id: int):
         await conn.execute("DELETE FROM msg_counts WHERE guild_id=$1 AND user_id=$2", guild_id, user_id)
 
 async def add_counted_points(guild_id: int, user_id: int, points: int):
+    # Verificación de seguridad
+    if bot_pool is None: return
     async with bot_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO msg_counts (guild_id, user_id, counted)
@@ -158,6 +164,38 @@ def require_staff():
             return False
         return True
     return app_commands.check(predicate)
+
+# ---------- EVENTOS ----------
+@bot.event
+async def on_ready():
+    await init_db()
+    try:
+        if GUILD_ID:
+            guild = discord.Object(id=int(GUILD_ID))
+            bot.tree.copy_global_to(guild=guild)
+            await bot.tree.sync(guild=guild)
+            print("✅ Comandos sincronizados en tu servidor")
+        else:
+            await bot.tree.sync()
+            print("✅ Comandos sincronizados globalmente")
+    except Exception as e:
+        print("❌ Error sincronizando comandos:", e)
+    print(f"🤖 Bot conectado como {bot.user}")
+
+@bot.event
+async def on_message(message: discord.Message):
+    # Si el pool no ha cargado aún o es un bot, ignoramos para no tirar error
+    if bot_pool is None or message.author.bot or not message.guild: 
+        return
+        
+    if await is_channel_permitted(message.guild.id, message.channel.id):
+        key = (message.guild.id, message.author.id)
+        partial_bucket[key] = partial_bucket.get(key, 0) + 1
+        if partial_bucket[key] >= COOLDOWN_MESSAGES:
+            partial_bucket[key] = 0
+            await add_counted_points(message.guild.id, message.author.id, 1)
+    
+    await bot.process_commands(message)
 
 # ---------- EVENTOS ----------
 @bot.event
