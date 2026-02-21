@@ -170,10 +170,6 @@ def require_staff():
 async def on_ready():
     await init_db()
     try:
-        # ⚠️ SOLO UNA VEZ
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        print("🧹 Comandos globales limpiados")
 
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
@@ -211,7 +207,7 @@ async def registrar(interaction: discord.Interaction, nickname: str, external_id
     if existing:
         return await interaction.response.send_message(embed=discord.Embed(description="🚫 **YA TE ENCUENTRAS REGISTRADO**", color=discord.Color.red()), ephemeral=True)
     await upsert_registro(interaction.user, nickname.strip(), external_id.strip())
-    embed = discord.Embed(title="✅ Registro Completado", description=f"Nick: `{nickname}`\nID: `{external_id}`", color=discord.Color.green())
+    embed = discord.Embed(title="✅ Registro Completado", description=f"Nick: `{nickname}`\nID Espacial: `{external_id}`", color=discord.Color.green())
     await dm_owner(f"🆕 Nuevo registro: {interaction.user} | Nick: {nickname} | ID: {external_id}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -224,7 +220,7 @@ async def consultar(interaction: discord.Interaction, usuario: discord.Member):
     embed.set_thumbnail(url=usuario.display_avatar.url)
     embed.add_field(name="Usuario", value=row['discord_tag'], inline=False)
     embed.add_field(name="Nick", value=row['nickname'], inline=True)
-    embed.add_field(name="ID", value=row['external_id'], inline=True)
+    embed.add_field(name="ID Espacial", value=row['external_id'], inline=True)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="userid", description="(Staff) Busca por ID Espacial")
@@ -331,7 +327,7 @@ class UserbaseView(discord.ui.View):
 
             # “misma tabla” → una línea por usuario con toda la info
             lines.append(
-                f"**{i}.** {discord_tag} | Nick=`{nickname}` | ID=`{external_id}`"
+                f"**{i}.** {discord_tag} | Nick=`{nickname}` | ID Espacial=`{external_id}`"
             )
 
         embed.description = "\n".join(lines) if lines else "Fin de la lista."
