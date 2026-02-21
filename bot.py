@@ -1,4 +1,4 @@
-print("✅º'º [DEBUG] ESTE bot.py SE ESTÁ EJECUTANDO º'º✅")
+print("🌲º'º [DEBUG] ESTE bot.py SE ESTÁ EJECUTANDO º'º🌲")
 
 import os
 import io
@@ -170,11 +170,7 @@ def require_staff():
 async def on_ready():
     await init_db()
     try:
-        # Limpia globales (hazlo 1 vez y luego lo quitas)
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        print("🧹 Comandos globales limpiados")
-
+    
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
             await bot.tree.sync(guild=guild)
