@@ -12,10 +12,16 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 GUILD_ID = os.getenv("GUILD_ID")
-STAFF_ROLES = [r.strip() for r in os.getenv("STAFF_ROLES", "Admin,Moderador,Mod").split(",") if r.strip()]
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
 
-# --- CORRECCIÓN CRÍTICA DE URL ---
+STAFF_ROLES = [
+    r.strip()
+    for r in os.getenv("STAFF_ROLES", "Admin,Moderador ES").split(",")
+    if r.strip()
+]
+
+_owner = os.getenv("OWNER_ID", "0")
+OWNER_ID = int(_owner) if _owner.isdigit() else 0
+
 raw_url = os.getenv("DATABASE_URL")
 if raw_url and raw_url.startswith("postgres://"):
     DATABASE_URL = raw_url.replace("postgres://", "postgresql://", 1)
@@ -30,7 +36,6 @@ intents.guilds = True
 intents.messages = True
 intents.message_content = True
 
-# CAMBIO: Usamos "_" como prefijo para evitar el error de NoneType y conflictos
 bot = commands.Bot(command_prefix="_", intents=intents)
 
 # Pool global para evitar saturar conexiones en Railway
@@ -169,33 +174,39 @@ def require_staff():
 @bot.event
 async def on_ready():
     await init_db()
+
+    guild_id = os.getenv("GUILD_ID")  # leerlo aquí (más fiable en Railway)
+
     try:
-    
-        if GUILD_ID:
-            guild = discord.Object(id=int(GUILD_ID))
-            await bot.tree.sync(guild=guild)
-            print("✅ Comandos sincronizados en tu servidor")
+        if not guild_id:
+            print("❌ Falta GUILD_ID en Railway Variables. No sincronizo comandos (para evitar sync global lento).")
+            print("👉 Solución: agrega GUILD_ID (ID del servidor) en Railway → Variables.")
         else:
-            await bot.tree.sync()
-            print("✅ Comandos sincronizados globalmente")
+            guild = discord.Object(id=int(guild_id))
+            synced = await bot.tree.sync(guild=guild)
+            print(f"✅ Comandos sincronizados en tu servidor (guild): {len(synced)}")
     except Exception as e:
-        print("❌ Error sincronizando comandos:", e)
+        print("❌ Error sincronizando comandos:", repr(e))
 
     print(f"🤖 Bot conectado como {bot.user}")
 
 @bot.event
 async def on_message(message: discord.Message):
-    # Si el pool no ha cargado aún o es un bot, ignoramos para no tirar error
-    if bot_pool is None or message.author.bot or not message.guild: 
+    if message.author.bot or not message.guild:
         return
-        
+
+    # Si todavía no hay pool, salimos sin romper
+    if bot_pool is None:
+        return
+
     if await is_channel_permitted(message.guild.id, message.channel.id):
         key = (message.guild.id, message.author.id)
         partial_bucket[key] = partial_bucket.get(key, 0) + 1
+
         if partial_bucket[key] >= COOLDOWN_MESSAGES:
             partial_bucket[key] = 0
             await add_counted_points(message.guild.id, message.author.id, 1)
-    
+
     await bot.process_commands(message)
 
 
