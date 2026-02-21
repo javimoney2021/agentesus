@@ -334,8 +334,28 @@ class UserbaseView(discord.ui.View):
         start = self.page * 10
         end = start + 10
         page_regs = self.registros[start:end]
-        embed = discord.Embed(title="📋 Lista de Usuarios", color=discord.Color.green())
-        lines = [f"**{i+1}.** {r['discord_tag']} | Nick={r['nickname']}" for i, r in enumerate(page_regs, start=start)]
+
+        embed = discord.Embed(
+            title="📋 Lista de Usuarios Registrados",
+            color=discord.Color.green()
+        )
+
+        def esc(s: str) -> str:
+            # evita que nombres raros rompan el formato del embed
+            return discord.utils.escape_markdown(str(s))
+
+        lines = []
+        for i, r in enumerate(page_regs, start=start + 1):
+            discord_id = r.get("user_id", "N/A")
+            discord_tag = esc(r.get("discord_tag", "N/A"))
+            nickname = esc(r.get("nickname", "N/A"))
+            external_id = esc(r.get("external_id", "N/A"))
+
+            # “misma tabla” → una línea por usuario con toda la info
+            lines.append(
+                f"**{i}.** {discord_tag} | Nick=`{nickname}` | DiscordID=`{discord_id}` | ID=`{external_id}`"
+            )
+
         embed.description = "\n".join(lines) if lines else "Fin de la lista."
         return embed
 
