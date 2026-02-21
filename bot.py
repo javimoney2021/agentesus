@@ -36,10 +36,10 @@ intents.guilds = True
 intents.messages = True
 intents.message_content = True
 
-bot = commands.Bot(command_prefix="_", intents=intents)
 
 # Pool global para evitar saturar conexiones en Railway
 bot_pool = None
+
 
 # ---------- BASE DE DATOS ----------
 async def init_db():
@@ -73,6 +73,7 @@ async def init_db():
     except Exception as e:
         print(f"❌ Error conectando a la DB: {e}")
 
+
 async def upsert_registro(user, nickname, external_id):
     async with bot_pool.acquire() as conn:
         await conn.execute("""
@@ -85,44 +86,59 @@ async def upsert_registro(user, nickname, external_id):
                 updated_at = CURRENT_TIMESTAMP
         """, user.id, str(user), nickname, external_id)
 
+
 async def get_registro(user_id):
     async with bot_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM registros WHERE user_id=$1", user_id)
+
 
 async def get_all_registros():
     async with bot_pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM registros ORDER BY updated_at DESC")
 
+
 async def delete_registro(user_id: int):
     async with bot_pool.acquire() as conn:
         await conn.execute("DELETE FROM registros WHERE user_id=$1", user_id)
 
+
 async def permit_channel(guild_id: int, channel_id: int):
     async with bot_pool.acquire() as conn:
-        await conn.execute("INSERT INTO permitted_channels (guild_id, channel_id) VALUES ($1, $2) ON CONFLICT DO NOTHING", guild_id, channel_id)
+        await conn.execute(
+            "INSERT INTO permitted_channels (guild_id, channel_id) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+            guild_id, channel_id
+        )
+
 
 async def unpermit_channel(guild_id: int, channel_id: int):
     async with bot_pool.acquire() as conn:
         await conn.execute("DELETE FROM permitted_channels WHERE guild_id=$1 AND channel_id=$2", guild_id, channel_id)
 
+
 async def is_channel_permitted(guild_id: int, channel_id: int) -> bool:
-    # Verificación de seguridad para evitar el error de AttributeError
-    if bot_pool is None: return False
+    if bot_pool is None:
+        return False
     async with bot_pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT 1 FROM permitted_channels WHERE guild_id=$1 AND channel_id=$2", guild_id, channel_id)
+        row = await conn.fetchrow(
+            "SELECT 1 FROM permitted_channels WHERE guild_id=$1 AND channel_id=$2",
+            guild_id, channel_id
+        )
         return row is not None
+
 
 async def reset_table(guild_id: int):
     async with bot_pool.acquire() as conn:
         await conn.execute("DELETE FROM msg_counts WHERE guild_id=$1", guild_id)
 
+
 async def reset_user_count(guild_id: int, user_id: int):
     async with bot_pool.acquire() as conn:
         await conn.execute("DELETE FROM msg_counts WHERE guild_id=$1 AND user_id=$2", guild_id, user_id)
 
+
 async def add_counted_points(guild_id: int, user_id: int, points: int):
-    # Verificación de seguridad
-    if bot_pool is None: return
+    if bot_pool is None:
+        return
     async with bot_pool.acquire() as conn:
         await conn.execute("""
             INSERT INTO msg_counts (guild_id, user_id, counted)
@@ -132,25 +148,38 @@ async def add_counted_points(guild_id: int, user_id: int, points: int):
                 updated_at = CURRENT_TIMESTAMP
         """, guild_id, user_id, points)
 
+
 async def get_leaderboard(guild_id: int, limit: int, offset: int):
     async with bot_pool.acquire() as conn:
-        return await conn.fetch("SELECT user_id, counted FROM msg_counts WHERE guild_id=$1 ORDER BY counted DESC, updated_at DESC LIMIT $2 OFFSET $3", guild_id, limit, offset)
+        return await conn.fetch(
+            "SELECT user_id, counted FROM msg_counts WHERE guild_id=$1 ORDER BY counted DESC, updated_at DESC LIMIT $2 OFFSET $3",
+            guild_id, limit, offset
+        )
+
 
 async def get_leaderboard_total(guild_id: int) -> int:
     async with bot_pool.acquire() as conn:
         row = await conn.fetchrow("SELECT COUNT(*) FROM msg_counts WHERE guild_id=$1", guild_id)
         return int(row[0]) if row else 0
 
+
 async def get_by_external_id(external_id: str):
     async with bot_pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM registros WHERE external_id=$1 ORDER BY updated_at DESC", external_id)
+        return await conn.fetch(
+            "SELECT * FROM registros WHERE external_id=$1 ORDER BY updated_at DESC",
+            external_id
+        )
+
 
 async def dm_owner(text: str):
-    if not OWNER_ID: return
+    if not OWNER_ID:
+        return
     try:
         user = await bot.fetch_user(OWNER_ID)
         await user.send(text)
-    except: pass
+    except:
+        pass
+
 
 # ---------- PERMISOS ----------
 def is_staff(interaction):
@@ -162,6 +191,7 @@ def is_staff(interaction):
             return True
     return False
 
+
 def require_staff():
     async def predicate(interaction):
         if not is_staff(interaction):
@@ -170,32 +200,46 @@ def require_staff():
         return True
     return app_commands.check(predicate)
 
+
+# ---------- BOT (FIX SYNC) ----------
+class MyBot(commands.Bot):
+    async def setup_hook(self):
+        await init_db()
+
+        guild_id = os.getenv("GUILD_ID")
+        if not guild_id:
+            print("❌ Falta GUILD_ID en Railway Variables. No sincronizo comandos.")
+            return
+
+        guild = discord.Object(id=int(guild_id))
+
+        # Forzar que los slash commands se publiquen en el servidor (dev rápido)
+        self.tree.copy_global_to(guild=guild)
+
+        synced = await self.tree.sync(guild=guild)
+        print(f"✅ Comandos sincronizados en tu servidor (guild): {len(synced)}")
+
+        # Si vuelve a salir 0, imprimimos lo que realmente hay cargado
+        if len(synced) == 0:
+            cmds = [c.name for c in self.tree.get_commands()]
+            print("🧾 Comandos cargados en el árbol:", cmds)
+            print("👉 Si esta lista sale vacía, tus comandos no están registrándose antes del sync.")
+
+
+bot = MyBot(command_prefix="_", intents=intents)
+
+
 # ---------- EVENTOS ----------
 @bot.event
 async def on_ready():
-    await init_db()
-
-    guild_id = os.getenv("GUILD_ID")  # leerlo aquí (más fiable en Railway)
-
-    try:
-        if not guild_id:
-            print("❌ Falta GUILD_ID en Railway Variables. No sincronizo comandos (para evitar sync global lento).")
-            print("👉 Solución: agrega GUILD_ID (ID del servidor) en Railway → Variables.")
-        else:
-            guild = discord.Object(id=int(guild_id))
-            synced = await bot.tree.sync(guild=guild)
-            print(f"✅ Comandos sincronizados en tu servidor (guild): {len(synced)}")
-    except Exception as e:
-        print("❌ Error sincronizando comandos:", repr(e))
-
     print(f"🤖 Bot conectado como {bot.user}")
+
 
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    # Si todavía no hay pool, salimos sin romper
     if bot_pool is None:
         return
 
@@ -210,23 +254,31 @@ async def on_message(message: discord.Message):
     await bot.process_commands(message)
 
 
-
 # ---------- COMANDOS ----------
 @bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
 async def registrar(interaction: discord.Interaction, nickname: str, external_id: str):
     existing = await get_registro(interaction.user.id)
     if existing:
-        return await interaction.response.send_message(embed=discord.Embed(description="🚫 **YA TE ENCUENTRAS REGISTRADO**", color=discord.Color.red()), ephemeral=True)
+        return await interaction.response.send_message(
+            embed=discord.Embed(description="🚫 **YA TE ENCUENTRAS REGISTRADO**", color=discord.Color.red()),
+            ephemeral=True
+        )
     await upsert_registro(interaction.user, nickname.strip(), external_id.strip())
-    embed = discord.Embed(title="✅ Registro Completado", description=f"Nick: `{nickname}`\nID: `{external_id}`", color=discord.Color.green())
+    embed = discord.Embed(
+        title="✅ Registro Completado",
+        description=f"Nick: `{nickname}`\nID: `{external_id}`",
+        color=discord.Color.green()
+    )
     await dm_owner(f"🆕 Nuevo registro: {interaction.user} | Nick: {nickname} | ID: {external_id}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
+
 
 @bot.tree.command(name="consultar", description="(Staff) Consultar Registro")
 @require_staff()
 async def consultar(interaction: discord.Interaction, usuario: discord.Member):
     row = await get_registro(usuario.id)
-    if not row: return await interaction.response.send_message("No registrado.", ephemeral=True)
+    if not row:
+        return await interaction.response.send_message("No registrado.", ephemeral=True)
     embed = discord.Embed(title="📄 Registro", color=discord.Color.blue())
     embed.set_thumbnail(url=usuario.display_avatar.url)
     embed.add_field(name="Usuario", value=row['discord_tag'], inline=False)
@@ -234,15 +286,22 @@ async def consultar(interaction: discord.Interaction, usuario: discord.Member):
     embed.add_field(name="ID", value=row['external_id'], inline=True)
     await interaction.response.send_message(embed=embed)
 
+
 @bot.tree.command(name="userid", description="(Staff) Busca por ID Espacial")
 @require_staff()
 async def userid(interaction: discord.Interaction, id_espacial: str):
     rows = await get_by_external_id(id_espacial.strip())
-    if not rows: return await interaction.response.send_message(f"ℹ️ No encontré registros con ID `{id_espacial}`.")
+    if not rows:
+        return await interaction.response.send_message(f"ℹ️ No encontré registros con ID `{id_espacial}`.")
     embed = discord.Embed(title="🔎 Resultados", color=discord.Color.blurple())
     for r in rows[:10]:
-        embed.add_field(name=r['discord_tag'], value=f"Nick: `{r['nickname']}`\nDiscord ID: `{r['user_id']}`", inline=False)
+        embed.add_field(
+            name=r['discord_tag'],
+            value=f"Nick: `{r['nickname']}`\nDiscord ID: `{r['user_id']}`",
+            inline=False
+        )
     await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="editar", description="(Staff) Editar Registro")
 @require_staff()
@@ -250,11 +309,13 @@ async def editar(interaction: discord.Interaction, usuario: discord.Member, nick
     await upsert_registro(usuario, nickname.strip(), external_id.strip())
     await interaction.response.send_message("✏️ Registro Actualizado.")
 
+
 @bot.tree.command(name="eliminar_registro", description="(Staff) Elimina registro")
 @require_staff()
 async def eliminar_registro(interaction: discord.Interaction, usuario: discord.Member):
     await delete_registro(usuario.id)
     await interaction.response.send_message(f"🗑️ Registro eliminado para **{usuario}**.")
+
 
 @bot.tree.command(name="permitchannel", description="(Admin) Autoriza canal")
 @require_staff()
@@ -262,17 +323,20 @@ async def permitchannel_cmd(interaction: discord.Interaction, canal: discord.Tex
     await permit_channel(interaction.guild.id, canal.id)
     await interaction.response.send_message(f"✅ Canal autorizado: {canal.mention}", ephemeral=True)
 
+
 @bot.tree.command(name="borrarchannel", description="(Admin) Desautoriza canal")
 @require_staff()
 async def borrarchannel_cmd(interaction: discord.Interaction, canal: discord.TextChannel):
     await unpermit_channel(interaction.guild.id, canal.id)
     await interaction.response.send_message(f"🗑️ Canal desautorizado: {canal.mention}", ephemeral=True)
 
+
 @bot.tree.command(name="reset_tabla", description="(Staff) Resetea Ranking")
 @require_staff()
 async def reset_tabla_cmd(interaction: discord.Interaction):
     await reset_table(interaction.guild.id)
     await interaction.response.send_message("✅ Tabla reseteada.")
+
 
 class TablaView(discord.ui.View):
     def __init__(self, guild_id: int, page: int = 0):
@@ -297,18 +361,22 @@ class TablaView(discord.ui.View):
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction, button):
-        if self.page > 0: self.page -= 1
+        if self.page > 0:
+            self.page -= 1
         await interaction.response.edit_message(embed=await self.build_embed(interaction), view=self)
 
     @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
-        if (self.page + 1) * 10 < await get_leaderboard_total(self.guild_id): self.page += 1
+        if (self.page + 1) * 10 < await get_leaderboard_total(self.guild_id):
+            self.page += 1
         await interaction.response.edit_message(embed=await self.build_embed(interaction), view=self)
+
 
 @bot.tree.command(name="tabla", description="Muestra el Ranking")
 async def tabla_cmd(interaction: discord.Interaction):
     view = TablaView(interaction.guild.id)
     await interaction.response.send_message(embed=await view.build_embed(interaction), view=view)
+
 
 class UserbaseView(discord.ui.View):
     def __init__(self, registros, page=0):
@@ -327,7 +395,6 @@ class UserbaseView(discord.ui.View):
         )
 
         def esc(s: str) -> str:
-            # evita que nombres raros rompan el formato del embed
             return discord.utils.escape_markdown(str(s))
 
         lines = []
@@ -335,8 +402,6 @@ class UserbaseView(discord.ui.View):
             discord_tag = esc(r.get("discord_tag", "N/A"))
             nickname = esc(r.get("nickname", "N/A"))
             external_id = esc(r.get("external_id", "N/A"))
-
-            # “misma tabla” → una línea por usuario con toda la info
             lines.append(
                 f"**{i}.** {discord_tag} | Nick=`{nickname}` | ID=`{external_id}`"
             )
@@ -346,21 +411,28 @@ class UserbaseView(discord.ui.View):
 
     @discord.ui.button(label="❮", style=discord.ButtonStyle.secondary)
     async def prev(self, interaction, button):
-        if self.page > 0: self.page -= 1
+        if self.page > 0:
+            self.page -= 1
         await interaction.response.edit_message(embed=await self.build_embed(), view=self)
 
     @discord.ui.button(label="❯", style=discord.ButtonStyle.secondary)
     async def next(self, interaction, button):
-        if (self.page + 1) * 10 < len(self.registros): self.page += 1
+        if (self.page + 1) * 10 < len(self.registros):
+            self.page += 1
         await interaction.response.edit_message(embed=await self.build_embed(), view=self)
+
 
 @bot.tree.command(name="userbase", description="(Staff) Ver registrados")
 @require_staff()
 async def userbase(interaction: discord.Interaction):
     regs = await get_all_registros()
-    if not regs: return await interaction.response.send_message("No hay registros.", ephemeral=True)
+    if not regs:
+        return await interaction.response.send_message("No hay registros.", ephemeral=True)
     view = UserbaseView(regs)
     await interaction.response.send_message(embed=await view.build_embed(), view=view)
 
-if not TOKEN: raise RuntimeError("Falta DISCORD_TOKEN")
+
+if not TOKEN:
+    raise RuntimeError("Falta DISCORD_TOKEN")
+
 bot.run(TOKEN)
