@@ -170,6 +170,10 @@ def require_staff():
 async def on_ready():
     await init_db()
     try:
+        # Limpia globales (hazlo 1 vez y luego lo quitas)
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        print("🧹 Comandos globales limpiados")
 
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
