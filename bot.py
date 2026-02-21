@@ -1,4 +1,4 @@
-print("✅ [DEBUG] ESTE bot.py SE ESTÁ EJECUTANDO ✅")
+print("✅º'º [DEBUG] ESTE bot.py SE ESTÁ EJECUTANDO º'º✅")
 
 import os
 import io
@@ -170,9 +170,13 @@ def require_staff():
 async def on_ready():
     await init_db()
     try:
+        # ⚠️ SOLO UNA VEZ
+        bot.tree.clear_commands(guild=None)
+        await bot.tree.sync()
+        print("🧹 Comandos globales limpiados")
+
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
-            bot.tree.copy_global_to(guild=guild)
             await bot.tree.sync(guild=guild)
             print("✅ Comandos sincronizados en tu servidor")
         else:
@@ -180,6 +184,7 @@ async def on_ready():
             print("✅ Comandos sincronizados globalmente")
     except Exception as e:
         print("❌ Error sincronizando comandos:", e)
+
     print(f"🤖 Bot conectado como {bot.user}")
 
 @bot.event
