@@ -170,10 +170,6 @@ def require_staff():
 async def on_ready():
     await init_db()
     try:
-        # Limpia globales (hazlo 1 vez y luego lo quitas)
-        bot.tree.clear_commands(guild=None)
-        await bot.tree.sync()
-        print("🧹 Comandos globales limpiados")
 
         if GUILD_ID:
             guild = discord.Object(id=int(GUILD_ID))
@@ -206,30 +202,30 @@ async def on_message(message: discord.Message):
 
 # ---------- COMANDOS ----------
 @bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
-async def registrar(interaction: discord.Interaction, Nickname: str, ID_Espacial: str):
+async def registrar(interaction: discord.Interaction, nickname: str, external_id: str):
     existing = await get_registro(interaction.user.id)
     if existing:
         return await interaction.response.send_message(embed=discord.Embed(description="🚫 **YA TE ENCUENTRAS REGISTRADO**", color=discord.Color.red()), ephemeral=True)
     await upsert_registro(interaction.user, nickname.strip(), external_id.strip())
-    embed = discord.Embed(title="✅ Registro Completado", description=f"Nick: `{nickname}`\nID Espacial: `{external_id}`", color=discord.Color.green())
+    embed = discord.Embed(title="✅ Registro Completado", description=f"Nick: `{nickname}`\nID: `{external_id}`", color=discord.Color.green())
     await dm_owner(f"🆕 Nuevo registro: {interaction.user} | Nick: {nickname} | ID: {external_id}")
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name="consultar", description="(Staff) Consultar Registro")
 @require_staff()
-async def consultar(interaction: discord.Interaction, Usuario: discord.Member):
+async def consultar(interaction: discord.Interaction, usuario: discord.Member):
     row = await get_registro(usuario.id)
     if not row: return await interaction.response.send_message("No registrado.", ephemeral=True)
     embed = discord.Embed(title="📄 Registro", color=discord.Color.blue())
     embed.set_thumbnail(url=usuario.display_avatar.url)
     embed.add_field(name="Usuario", value=row['discord_tag'], inline=False)
     embed.add_field(name="Nick", value=row['nickname'], inline=True)
-    embed.add_field(name="ID Espacial", value=row['external_id'], inline=True)
+    embed.add_field(name="ID", value=row['external_id'], inline=True)
     await interaction.response.send_message(embed=embed)
 
 @bot.tree.command(name="userid", description="(Staff) Busca por ID Espacial")
 @require_staff()
-async def userid(interaction: discord.Interaction, ID_Espacial: str):
+async def userid(interaction: discord.Interaction, id_espacial: str):
     rows = await get_by_external_id(id_espacial.strip())
     if not rows: return await interaction.response.send_message(f"ℹ️ No encontré registros con ID `{id_espacial}`.")
     embed = discord.Embed(title="🔎 Resultados", color=discord.Color.blurple())
@@ -239,25 +235,25 @@ async def userid(interaction: discord.Interaction, ID_Espacial: str):
 
 @bot.tree.command(name="editar", description="(Staff) Editar Registro")
 @require_staff()
-async def editar(interaction: discord.Interaction, Usuario: discord.Member, Nickname: str, ID_Espacial: str):
+async def editar(interaction: discord.Interaction, usuario: discord.Member, nickname: str, external_id: str):
     await upsert_registro(usuario, nickname.strip(), external_id.strip())
     await interaction.response.send_message("✏️ Registro Actualizado.")
 
 @bot.tree.command(name="eliminar_registro", description="(Staff) Elimina registro")
 @require_staff()
-async def eliminar_registro(interaction: discord.Interaction, Usuario: discord.Member):
+async def eliminar_registro(interaction: discord.Interaction, usuario: discord.Member):
     await delete_registro(usuario.id)
     await interaction.response.send_message(f"🗑️ Registro eliminado para **{usuario}**.")
 
 @bot.tree.command(name="permitchannel", description="(Admin) Autoriza canal")
 @require_staff()
-async def permitchannel_cmd(interaction: discord.Interaction, Canal: discord.TextChannel):
+async def permitchannel_cmd(interaction: discord.Interaction, canal: discord.TextChannel):
     await permit_channel(interaction.guild.id, canal.id)
     await interaction.response.send_message(f"✅ Canal autorizado: {canal.mention}", ephemeral=True)
 
 @bot.tree.command(name="borrarchannel", description="(Admin) Desautoriza canal")
 @require_staff()
-async def borrarchannel_cmd(interaction: discord.Interaction, Canal: discord.TextChannel):
+async def borrarchannel_cmd(interaction: discord.Interaction, canal: discord.TextChannel):
     await unpermit_channel(interaction.guild.id, canal.id)
     await interaction.response.send_message(f"🗑️ Canal desautorizado: {canal.mention}", ephemeral=True)
 
@@ -331,7 +327,7 @@ class UserbaseView(discord.ui.View):
 
             # “misma tabla” → una línea por usuario con toda la info
             lines.append(
-                f"**{i}.** {discord_tag} | Nick=`{nickname}` | ID Espacial=`{external_id}`"
+                f"**{i}.** {discord_tag} | Nick=`{nickname}` | ID=`{external_id}`"
             )
 
         embed.description = "\n".join(lines) if lines else "Fin de la lista."
