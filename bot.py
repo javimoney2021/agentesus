@@ -352,7 +352,7 @@ class UserbaseView(discord.ui.View):
 
             # “misma tabla” → una línea por usuario con toda la info
             lines.append(
-                f"**{i}.** {discord_tag} | Nick=`{nickname}` | DiscordID=`{discord_id}` | ID=`{external_id}`"
+                f"**{i}.** {discord_tag} | Nick=`{nickname}` | ID=`{external_id}`"
             )
 
         embed.description = "\n".join(lines) if lines else "Fin de la lista."
