@@ -346,7 +346,6 @@ class UserbaseView(discord.ui.View):
 
         lines = []
         for i, r in enumerate(page_regs, start=start + 1):
-            discord_id = r.get("user_id", "N/A")
             discord_tag = esc(r.get("discord_tag", "N/A"))
             nickname = esc(r.get("nickname", "N/A"))
             external_id = esc(r.get("external_id", "N/A"))
