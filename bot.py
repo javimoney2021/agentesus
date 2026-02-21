@@ -202,33 +202,7 @@ async def on_message(message: discord.Message):
     
     await bot.process_commands(message)
 
-# ---------- EVENTOS ----------
-@bot.event
-async def on_ready():
-    await init_db()
-    try:
-        if GUILD_ID:
-            guild = discord.Object(id=int(GUILD_ID))
-            bot.tree.copy_global_to(guild=guild)
-            await bot.tree.sync(guild=guild)
-            print("✅ Comandos sincronizados en tu servidor")
-        else:
-            await bot.tree.sync()
-            print("✅ Comandos sincronizados globalmente")
-    except Exception as e:
-        print("❌ Error sincronizando comandos:", e)
-    print(f"🤖 Bot conectado como {bot.user}")
 
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild: return
-    if await is_channel_permitted(message.guild.id, message.channel.id):
-        key = (message.guild.id, message.author.id)
-        partial_bucket[key] = partial_bucket.get(key, 0) + 1
-        if partial_bucket[key] >= COOLDOWN_MESSAGES:
-            partial_bucket[key] = 0
-            await add_counted_points(message.guild.id, message.author.id, 1)
-    await bot.process_commands(message)
 
 # ---------- COMANDOS ----------
 @bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
