@@ -255,21 +255,37 @@ async def on_message(message: discord.Message):
 
 
 # ---------- COMANDOS ----------
+from discord import app_commands
+
 @bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
+@app_commands.rename(nickname="Nickname", external_id="ID_Espacial")
+@app_commands.describe(
+    nickname="Tu nickname dentro del servidor",
+    external_id="Tu ID espacial"
+)
 async def registrar(interaction: discord.Interaction, nickname: str, external_id: str):
     existing = await get_registro(interaction.user.id)
     if existing:
         return await interaction.response.send_message(
-            embed=discord.Embed(description="🚫 **YA TE ENCUENTRAS REGISTRADO**", color=discord.Color.red()),
+            embed=discord.Embed(
+                description="🚫 **YA TE ENCUENTRAS REGISTRADO**",
+                color=discord.Color.red()
+            ),
             ephemeral=True
         )
+
     await upsert_registro(interaction.user, nickname.strip(), external_id.strip())
+
     embed = discord.Embed(
         title="✅ Registro Completado",
         description=f"Nick: `{nickname}`\nID: `{external_id}`",
         color=discord.Color.green()
     )
-    await dm_owner(f"🆕 Nuevo registro: {interaction.user} | Nick: {nickname} | ID: {external_id}")
+
+    await dm_owner(
+        f"🆕 Nuevo registro: {interaction.user} | Nick: {nickname} | ID: {external_id}"
+    )
+
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
