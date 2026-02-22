@@ -258,7 +258,7 @@ async def on_message(message: discord.Message):
 from discord import app_commands
 
 @bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
-@app_commands.rename(nickname="Nickname", external_id="ID_Espacial")
+@app_commands.rename(nickname="nickname", external_id="id_espacial")
 @app_commands.describe(
     nickname="Tu nickname dentro del servidor",
     external_id="Tu ID espacial"
