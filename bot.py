@@ -260,8 +260,8 @@ from discord import app_commands
 @bot.tree.command(name="registrar", description="Registra Nickname e ID Espacial")
 @app_commands.rename(nickname="nickname", external_id="id_espacial")
 @app_commands.describe(
-    nickname="Tu nickname dentro del servidor",
-    external_id="Tu ID espacial"
+    nickname="Tu Nickname de SuperSus",
+    external_id="Tu ID Espacial"
 )
 async def registrar(interaction: discord.Interaction, nickname: str, external_id: str):
     existing = await get_registro(interaction.user.id)
