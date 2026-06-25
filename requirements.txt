@@ -1,0 +1,8 @@
+discord.py
+aiosqlite
+python-dotenv
+asyncpg
+aiohttp
+boto3
+
+
