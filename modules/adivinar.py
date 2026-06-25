@@ -41,7 +41,7 @@ async def handle_setup_message(bot, message: discord.Message) -> bool:
             if canal_obj:
                 await canal_obj.send(start_msg)
 
-            await message.reply(f"🚀 **Dinámica activada.** El anuncio de inicio ha sido enviado a {canal_obj.mention if canal_obj else 'el canal'}.")
+            await message.reply(f"🚀 **Dinámica Activada.** El anuncio de inicio ha sido enviado a {canal_obj.mention if canal_obj else 'el canal'}.")
             return True
 
     return False
@@ -81,7 +81,7 @@ def setup(bot):
         await interaction.response.send_message(
             f"🎯 **Dinámica Iniciada (Paso 1/3)**\n"
             f"Palabra: `{palabra}` | Canal: {canal.mention}\n\n"
-            f"👉 **Paso 2:** Escribe el mensaje que el bot enviará cuando alguien **GANE**.\n"
+            f"👉 **Paso 2:** Escribe el anuncio que el bot enviará cuando alguien **GANE**.\n"
             f"*(Puedes usar `{{winner}}` y `{{word}}`)*",
             ephemeral=True
         )
