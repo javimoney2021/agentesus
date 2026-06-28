@@ -23,6 +23,8 @@ MAX_PUBLISH_ATTEMPTS = 3
 R2_CLEANUP_DELAY_SECONDS = 30
 PENDING_TIMEOUT_SECONDS = 300
 SOURCE_MESSAGE_DELETE_DELAY_SECONDS = 2
+CHANNELS_PER_PAGE = 25
+MAX_SELECTABLE_CHANNELS = 50
 
 
 async def load_cache(guild_id=None):
@@ -65,9 +67,11 @@ def build_panel_embed(guild_id):
     return embed
 
 
-def channel_options(guild):
+def channel_options(guild, page=0):
     options = []
-    for channel in guild.text_channels[:25]:
+    start = page * CHANNELS_PER_PAGE
+    end = start + CHANNELS_PER_PAGE
+    for channel in guild.text_channels[:MAX_SELECTABLE_CHANNELS][start:end]:
         options.append(
             discord.SelectOption(
                 label=channel.name[:100],
@@ -76,6 +80,10 @@ def channel_options(guild):
             )
         )
     return options
+
+
+def has_channel_page(guild, page):
+    return bool(channel_options(guild, page))
 
 
 def scheduled_options(guild_id):
@@ -315,10 +323,38 @@ class ChannelSelect(ui.Select):
 
 
 class ChannelSelectView(AuthorView):
-    def __init__(self, author_id: int, mode: str, guild):
+    def __init__(self, author_id: int, mode: str, guild, page=0):
         super().__init__(author_id)
-        select = ChannelSelect(mode, channel_options(guild))
-        self.add_item(select)
+        self.mode = mode
+        self.page = page
+        self.guild_id = guild.id
+        self.add_item(ChannelSelect(mode, channel_options(guild, page)))
+
+        prev_button = ui.Button(label="◀", style=discord.ButtonStyle.secondary, disabled=page <= 0)
+        next_button = ui.Button(
+            label="▶",
+            style=discord.ButtonStyle.secondary,
+            disabled=not has_channel_page(guild, page + 1)
+        )
+
+        async def prev_callback(interaction: discord.Interaction):
+            if not await self.guard(interaction):
+                return
+            await interaction.response.edit_message(
+                view=ChannelSelectView(self.author_id, self.mode, interaction.guild, self.page - 1)
+            )
+
+        async def next_callback(interaction: discord.Interaction):
+            if not await self.guard(interaction):
+                return
+            await interaction.response.edit_message(
+                view=ChannelSelectView(self.author_id, self.mode, interaction.guild, self.page + 1)
+            )
+
+        prev_button.callback = prev_callback
+        next_button.callback = next_callback
+        self.add_item(prev_button)
+        self.add_item(next_button)
 
 
 class ScheduleModal(ui.Modal, title="Agendar Publicación"):
