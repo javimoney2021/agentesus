@@ -10,10 +10,12 @@ PENDING_SETUPS = {}
 
 async def handle_setup_message(bot, message: discord.Message) -> bool:
     if message.author.id in PENDING_SETUPS:
+        setup = PENDING_SETUPS[message.author.id]
+        if setup.get("origin_channel_id") != message.channel.id:
+            return False
+
         if message.content.startswith(bot.command_prefix):
             return True
-
-        setup = PENDING_SETUPS[message.author.id]
 
         if setup.get("step") == 1:
             setup["winner_msg"] = message.content
@@ -74,6 +76,7 @@ def setup(bot):
     async def adivinar(interaction: discord.Interaction, palabra: str, canal: discord.TextChannel):
         PENDING_SETUPS[interaction.user.id] = {
             "channel_id": canal.id,
+            "origin_channel_id": interaction.channel_id,
             "word": normalize_text(palabra),
             "original_word": palabra,
             "step": 1
