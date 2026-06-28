@@ -343,11 +343,10 @@ class ScheduleModal(ui.Modal, title="Agendar Publicación"):
             "origin_channel_id": self.panel_interaction.channel_id,
             "scheduled_at": scheduled_at,
             "author_id": interaction.user.id,
-            "panel_interaction": self.panel_interaction,
-            "panel_message": self.panel_message,
+            "panel_interaction": interaction,
+            "panel_message": getattr(interaction, "message", None) or self.panel_message,
         })
-        await interaction.response.defer(ephemeral=True)
-        await self.panel_message.edit(
+        await interaction.response.edit_message(
             content="✅ Ahora posees 5 minutos para agendar tu publicación.",
             embed=None,
             view=None
@@ -612,8 +611,7 @@ class EditScheduleModal(ui.Modal, title="Editar Fecha"):
         if scheduled_at <= datetime.now(TZ_BRASILIA):
             return await interaction.response.send_message("❌ La fecha y hora deben ser futuras.", ephemeral=True)
         self.data["scheduled_at"] = scheduled_at
-        await interaction.response.defer(ephemeral=True)
-        await self.panel_message.edit(
+        await interaction.response.edit_message(
             content=None,
             embed=build_edit_confirm_embed(self.data),
             view=EditConfirmView(self.author_id, self.data)
