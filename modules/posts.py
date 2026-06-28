@@ -22,6 +22,7 @@ SCHEDULED_POSTS_CACHE = []
 MAX_PUBLISH_ATTEMPTS = 3
 R2_CLEANUP_DELAY_SECONDS = 30
 PENDING_TIMEOUT_SECONDS = 300
+SOURCE_MESSAGE_DELETE_DELAY_SECONDS = 2
 
 
 async def load_cache(guild_id=None):
@@ -112,6 +113,17 @@ async def cleanup_r2_now(urls):
         return
     for url in urls:
         await delete_from_r2(url)
+
+
+async def delete_message_after_delay(message, delay_seconds=SOURCE_MESSAGE_DELETE_DELAY_SECONDS):
+    if message is None:
+        return
+
+    await asyncio.sleep(delay_seconds)
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"⚠️ No se pudo borrar el mensaje fuente del post: {e}")
 
 
 async def upload_message_attachments(message: discord.Message):
@@ -522,6 +534,7 @@ class ScheduleConfirmView(AuthorView):
             content=f"✅ Tu publicación ha sido agendada con éxito el día **{fecha}** a las **{hora}**",
             embed=None, view=None
         )
+        interaction.client.loop.create_task(delete_message_after_delay(self.data.get("source_message")))
         self.stop()
 
     @ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
@@ -557,6 +570,7 @@ class InstantConfirmView(AuthorView):
         interaction.client.loop.create_task(cleanup_r2_after_delay(self.data.get("attachments")))
         PENDING_POSTS.pop(interaction.user.id, None)
         await interaction.response.edit_message(content="✅ Publicación enviada correctamente.", embed=None, view=None)
+        interaction.client.loop.create_task(delete_message_after_delay(self.data.get("source_message")))
         self.stop()
 
     @ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
@@ -736,6 +750,7 @@ async def handle_message(message: discord.Message) -> bool:
             return True
 
         data["content"] = message.content
+        data["source_message"] = message
         data["attachments"] = await upload_message_attachments(message)
 
         if data["mode"] == "instant":
