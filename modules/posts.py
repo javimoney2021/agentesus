@@ -23,9 +23,6 @@ MAX_PUBLISH_ATTEMPTS = 3
 R2_CLEANUP_DELAY_SECONDS = 30
 PENDING_TIMEOUT_SECONDS = 300
 SOURCE_MESSAGE_DELETE_DELAY_SECONDS = 2
-CHANNELS_PER_PAGE = 25
-MAX_SELECTABLE_CHANNELS = 100
-
 
 async def load_cache(guild_id=None):
     global SCHEDULED_POSTS_CACHE
@@ -65,25 +62,6 @@ def build_panel_embed(guild_id):
         lines.append(f"{i}. {row['title']}")
     embed.description = "\n".join(lines)
     return embed
-
-
-def channel_options(guild, page=0):
-    options = []
-    start = page * CHANNELS_PER_PAGE
-    end = start + CHANNELS_PER_PAGE
-    for channel in guild.text_channels[:MAX_SELECTABLE_CHANNELS][start:end]:
-        options.append(
-            discord.SelectOption(
-                label=channel.name[:100],
-                value=str(channel.id),
-                description=f"#{channel.name}"[:100],
-            )
-        )
-    return options
-
-
-def has_channel_page(guild, page):
-    return bool(channel_options(guild, page))
 
 
 def scheduled_options(guild_id):
@@ -231,7 +209,7 @@ class PostPanelView(AuthorView):
     async def instant_post(self, interaction: discord.Interaction, button: ui.Button):
         if not await self.guard(interaction):
             return
-        if not channel_options(interaction.guild):
+        if not interaction.guild.text_channels:
             return await interaction.response.edit_message(
                 content="❌ No hay canales de texto disponibles.",
                 embed=None,
@@ -240,14 +218,14 @@ class PostPanelView(AuthorView):
         await interaction.response.edit_message(
             content=None,
             embed=discord.Embed(title="Selecciona el canal para publicar ahora", color=discord.Color.blurple()),
-            view=ChannelSelectView(self.author_id, "instant", interaction.guild)
+            view=ChannelSelectView(self.author_id, "instant")
         )
 
     @ui.button(label="💾 Agendar", style=discord.ButtonStyle.success)
     async def schedule_post(self, interaction: discord.Interaction, button: ui.Button):
         if not await self.guard(interaction):
             return
-        if not channel_options(interaction.guild):
+        if not interaction.guild.text_channels:
             return await interaction.response.edit_message(
                 content="❌ No hay canales de texto disponibles.",
                 embed=None,
@@ -256,7 +234,7 @@ class PostPanelView(AuthorView):
         await interaction.response.edit_message(
             content=None,
             embed=discord.Embed(title="Selecciona el canal para agendar", color=discord.Color.green()),
-            view=ChannelSelectView(self.author_id, "schedule", interaction.guild)
+            view=ChannelSelectView(self.author_id, "schedule")
         )
 
     @ui.button(label="📝 Editar", style=discord.ButtonStyle.secondary)
@@ -292,17 +270,22 @@ class PostPanelView(AuthorView):
         )
 
 
-class ChannelSelect(ui.Select):
-    def __init__(self, mode: str, options):
+class ChannelSelect(ui.ChannelSelect):
+    def __init__(self, mode: str):
         self.mode = mode
-        super().__init__(placeholder="Selecciona un canal", min_values=1, max_values=1, options=options)
+        super().__init__(
+            placeholder="Busca o selecciona un canal",
+            min_values=1,
+            max_values=1,
+            channel_types=[discord.ChannelType.text, discord.ChannelType.news],
+        )
 
     async def callback(self, interaction: discord.Interaction):
         view: ChannelSelectView = self.view
         if not await view.guard(interaction):
             return
 
-        channel_id = int(self.values[0])
+        channel_id = self.values[0].id
         if self.mode == "instant":
             set_pending(interaction.user.id, {
                 "mode": "instant",
@@ -323,38 +306,9 @@ class ChannelSelect(ui.Select):
 
 
 class ChannelSelectView(AuthorView):
-    def __init__(self, author_id: int, mode: str, guild, page=0):
+    def __init__(self, author_id: int, mode: str):
         super().__init__(author_id)
-        self.mode = mode
-        self.page = page
-        self.guild_id = guild.id
-        self.add_item(ChannelSelect(mode, channel_options(guild, page)))
-
-        prev_button = ui.Button(label="◀", style=discord.ButtonStyle.secondary, disabled=page <= 0)
-        next_button = ui.Button(
-            label="▶",
-            style=discord.ButtonStyle.secondary,
-            disabled=not has_channel_page(guild, page + 1)
-        )
-
-        async def prev_callback(interaction: discord.Interaction):
-            if not await self.guard(interaction):
-                return
-            await interaction.response.edit_message(
-                view=ChannelSelectView(self.author_id, self.mode, interaction.guild, self.page - 1)
-            )
-
-        async def next_callback(interaction: discord.Interaction):
-            if not await self.guard(interaction):
-                return
-            await interaction.response.edit_message(
-                view=ChannelSelectView(self.author_id, self.mode, interaction.guild, self.page + 1)
-            )
-
-        prev_button.callback = prev_callback
-        next_button.callback = next_callback
-        self.add_item(prev_button)
-        self.add_item(next_button)
+        self.add_item(ChannelSelect(mode))
 
 
 class ScheduleModal(ui.Modal, title="Agendar Publicación"):
