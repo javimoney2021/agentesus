@@ -310,6 +310,7 @@ class ChannelSelectView(AuthorView):
 
 
 class ScheduleModal(ui.Modal, title="Agendar Publicación"):
+    nombre = ui.TextInput(label="Nombre del Post", placeholder="Nombre visible del agendamiento", max_length=100)
     fecha = ui.TextInput(label="Fecha", placeholder="DD/MM/AAAA", max_length=10)
     hora = ui.TextInput(label="Hora", placeholder="HH:MM", max_length=5)
 
@@ -336,12 +337,17 @@ class ScheduleModal(ui.Modal, title="Agendar Publicación"):
         if scheduled_at <= datetime.now(TZ_BRASILIA):
             return await interaction.response.send_message("❌ La fecha y hora deben ser futuras.", ephemeral=True)
 
+        title = self.nombre.value.strip()
+        if not title:
+            return await interaction.response.send_message("❌ El nombre del post no puede estar vacío.", ephemeral=True)
+
         set_pending(interaction.user.id, {
             "mode": "schedule",
             "step": "awaiting_content",
             "channel_id": self.channel_id,
             "origin_channel_id": self.panel_interaction.channel_id,
             "scheduled_at": scheduled_at,
+            "title": title,
             "author_id": interaction.user.id,
             "panel_interaction": interaction,
             "panel_message": getattr(interaction, "message", None) or self.panel_message,
@@ -731,9 +737,9 @@ async def handle_message(message: discord.Message) -> bool:
 
         data["content"] = message.content
         data["attachments"] = await upload_message_attachments(message)
-        data["title"] = post_title_from_content(message.content)
 
         if data["mode"] == "instant":
+            data["title"] = post_title_from_content(message.content)
             embed = discord.Embed(
                 title="Vista previa",
                 description=message.content or "*Sin contenido textual.*",
@@ -791,7 +797,7 @@ async def handle_message(message: discord.Message) -> bool:
 
         data["content"] = message.content
         data["attachments"] = await upload_message_attachments(message)
-        data["title"] = post_title_from_content(message.content)
+        data["title"] = post["title"]
         data["channel_id"] = post["channel_id"]
 
         await asyncio.sleep(1)
