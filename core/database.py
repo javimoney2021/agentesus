@@ -143,6 +143,20 @@ async def delete_scheduled_post(post_id):
         await conn.execute("DELETE FROM scheduled_posts WHERE id=$1", post_id)
 
 
+async def update_scheduled_post(post_id, title, content, attachment_urls, scheduled_at, thread_name=None):
+    async with bot_pool.acquire() as conn:
+        return await conn.fetchrow("""
+            UPDATE scheduled_posts
+            SET title=$2,
+                content=$3,
+                attachment_urls=$4,
+                scheduled_at=$5,
+                thread_name=$6
+            WHERE id=$1
+            RETURNING *
+        """, post_id, title, content, attachment_urls, scheduled_at, thread_name)
+
+
 async def get_expired_posts():
     async with bot_pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM scheduled_posts WHERE scheduled_at <= NOW()")
