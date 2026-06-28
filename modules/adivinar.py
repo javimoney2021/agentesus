@@ -18,17 +18,16 @@ async def handle_setup_message(bot, message: discord.Message) -> bool:
             return True
 
         if setup.get("step") == 1:
-            setup["winner_msg"] = message.content
+            setup["start_msg"] = message.content
             setup["step"] = 2
             await message.reply(
-                "✅ **Mensaje de Ganador guardado.**\n\n"
-                "👉 **Paso 3:** Escribe ahora el mensaje que se enviará al canal para **ANUNCIAR EL INICIO** de la dinámica.\n"
-                "*(Este mensaje se enviará al canal destino inmediatamente)*"
+                "✅ **Anuncio de Inicio guardado.**\n\n"
+                "🎉​ Anuncio de Ganadores ! **> usar {word} - {winner} <**"
             )
             return True
 
         if setup.get("step") == 2:
-            start_msg = message.content
+            winner_msg = message.content
             setup_data = PENDING_SETUPS.pop(message.author.id)
 
             canal_id = setup_data["channel_id"]
@@ -36,12 +35,12 @@ async def handle_setup_message(bot, message: discord.Message) -> bool:
 
             ACTIVE_GUESSES[canal_id] = {
                 "word": setup_data["word"],
-                "announcement": setup_data["winner_msg"],
+                "announcement": winner_msg,
                 "original_word": setup_data["original_word"]
             }
 
             if canal_obj:
-                await canal_obj.send(start_msg)
+                await canal_obj.send(setup_data["start_msg"])
 
             await message.reply(f"🚀 **Dinámica Activada.** El anuncio de inicio ha sido enviado a {canal_obj.mention if canal_obj else 'el canal'}.")
             return True
@@ -84,7 +83,6 @@ def setup(bot):
         await interaction.response.send_message(
             f"🎯 **Dinámica Iniciada (Paso 1/3)**\n"
             f"Palabra: `{palabra}` | Canal: {canal.mention}\n\n"
-            f"👉 **Paso 2:** Escribe el anuncio que el bot enviará cuando alguien **GANE**.\n"
-            f"*(Puedes usar `{{winner}}` y `{{word}}`)*",
+            f"📣​ Escribe Anuncio de **Inicio** de la Dinamica...",
             ephemeral=True
         )
