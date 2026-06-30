@@ -112,6 +112,31 @@ async def delete_message_after_delay(message, delay_seconds=SOURCE_MESSAGE_DELET
         print(f"⚠️ No se pudo borrar el mensaje fuente del post: {e}")
 
 
+async def delete_message_safely(message, label="mensaje"):
+    if message is None:
+        return
+
+    try:
+        await message.delete()
+    except Exception as e:
+        print(f"⚠️ No se pudo borrar {label}: {e}")
+
+
+async def delete_previous_prompt(message, interaction):
+    if message is not None:
+        try:
+            await message.delete()
+            return
+        except Exception:
+            pass
+
+    if interaction is not None:
+        try:
+            await interaction.delete_original_response()
+        except Exception as e:
+            print(f"⚠️ No se pudo borrar la solicitud anterior del post: {e}")
+
+
 async def upload_message_attachments(message: discord.Message):
     r2_urls = []
     if not message.attachments:
@@ -761,16 +786,20 @@ async def handle_message(message: discord.Message) -> bool:
             return True
 
         data["step"] = "awaiting_thread_choice"
-        await edit_pending_panel(
-            data,
-            content=None,
+        previous_prompt = data.get("panel_message")
+        previous_interaction = data.get("panel_interaction")
+        control_message = await message.reply(
             embed=discord.Embed(
                 title="¿Deseas crear un Hilo?",
                 description="El hilo se creará automáticamente cuando se publique el post.",
                 color=discord.Color.blurple()
             ),
-            view=ThreadChoiceView(message.author.id)
+            view=ThreadChoiceView(message.author.id),
+            mention_author=False
         )
+        data["panel_message"] = control_message
+        data["panel_interaction"] = None
+        await delete_previous_prompt(previous_prompt, previous_interaction)
         return True
 
     if data.get("step") == "awaiting_thread_name":
