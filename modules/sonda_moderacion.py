@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections import OrderedDict
+from collections import OrderedDict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -18,8 +18,10 @@ logger = logging.getLogger(__name__)
 UPPERCASE_SEQUENCE = re.compile(r"[A-Z]{8,}")
 TRACKING_TTL = timedelta(minutes=10)
 MAX_TRACKED_MESSAGES = 2_000
-AUDIT_LOG_DELAY_SECONDS = 1.5
+AUDIT_LOG_DELAY_SECONDS = 2
 AUDIT_LOG_WINDOW_SECONDS = 20
+AUTOMOD_CORRELATION_WINDOW_SECONDS = 8
+AUTOMOD_TRACKING_TTL = timedelta(seconds=30)
 
 
 @dataclass(frozen=True)
@@ -34,12 +36,25 @@ class TrackedMessage:
     created_at: datetime
 
 
+@dataclass
+class RecentAutoModAction:
+    guild_id: int
+    user_id: int
+    channel_id: int | None
+    content: str
+    rule_id: int
+    rule_name: str
+    action_name: str
+    occurred_at: datetime
+
+
 class ModerationProbe(commands.Cog):
     """Observa mensajes sin alterar el flujo normal ni aplicar moderacion."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.tracked_messages: OrderedDict[int, TrackedMessage] = OrderedDict()
+        self.recent_automod_actions: deque[RecentAutoModAction] = deque()
         self.audit_tasks: set[asyncio.Task[None]] = set()
 
     def cog_unload(self):
@@ -93,10 +108,22 @@ class ModerationProbe(commands.Cog):
 
     @commands.Cog.listener()
     async def on_automod_action(self, execution: discord.AutoModAction):
-        rule_name = f"regla ID {execution.rule_id}"
+        recent_action = RecentAutoModAction(
+            guild_id=execution.guild_id,
+            user_id=execution.user_id,
+            channel_id=execution.channel_id,
+            content=execution.content,
+            rule_id=execution.rule_id,
+            rule_name=f"regla ID {execution.rule_id}",
+            action_name=execution.action.type.name,
+            occurred_at=datetime.now(timezone.utc),
+        )
+        self.prune_expired_automod_actions()
+        self.recent_automod_actions.append(recent_action)
+
         try:
             rule = await execution.fetch_rule()
-            rule_name = rule.name
+            recent_action.rule_name = rule.name
         except discord.Forbidden:
             logger.warning("SONDA AutoMod | sin permiso para consultar la regla %s.", execution.rule_id)
         except discord.HTTPException:
@@ -111,7 +138,7 @@ class ModerationProbe(commands.Cog):
         logger.warning(
             "SONDA AutoMod | regla=%s (%s) | accion=%s | usuario=%s (%s) | "
             "canal=%s (%s) | contenido=%r",
-            rule_name,
+            recent_action.rule_name,
             execution.rule_id,
             execution.action.type.name,
             author_name,
@@ -129,9 +156,25 @@ class ModerationProbe(commands.Cog):
                 break
             self.tracked_messages.popitem(last=False)
 
+    def prune_expired_automod_actions(self):
+        cutoff = datetime.now(timezone.utc) - AUTOMOD_TRACKING_TTL
+        while self.recent_automod_actions and self.recent_automod_actions[0].occurred_at < cutoff:
+            self.recent_automod_actions.popleft()
+
     async def log_deletion_after_audit(self, guild: discord.Guild, tracked: TrackedMessage):
         await asyncio.sleep(AUDIT_LOG_DELAY_SECONDS)
-        executor, found_in_audit = await self.find_delete_executor(guild, tracked)
+        automod_action = self.find_matching_automod_action(tracked)
+        if automod_action is not None:
+            executor = (
+                f"Discord AutoMod ({automod_action.rule_name}, "
+                f"accion={automod_action.action_name})"
+            )
+            audit_status = "evento AutoMod correlacionado"
+        else:
+            executor, found_in_audit = await self.find_delete_executor(guild, tracked)
+            audit_status = (
+                "encontrada" if found_in_audit else "no encontrada (posible autoeliminacion)"
+            )
 
         logger.warning(
             "SONDA | borrado de mayusculas detectado | autor=%s (%s) | "
@@ -143,8 +186,25 @@ class ModerationProbe(commands.Cog):
             tracked.id,
             tracked.content,
             executor,
-            "encontrada" if found_in_audit else "no encontrada (posible autoeliminacion)",
+            audit_status,
         )
+
+    def find_matching_automod_action(
+        self, tracked: TrackedMessage
+    ) -> RecentAutoModAction | None:
+        self.prune_expired_automod_actions()
+
+        for action in reversed(self.recent_automod_actions):
+            seconds_apart = abs((action.occurred_at - tracked.created_at).total_seconds())
+            if (
+                action.guild_id == tracked.guild_id
+                and action.user_id == tracked.author_id
+                and action.channel_id == tracked.channel_id
+                and action.content == tracked.content
+                and seconds_apart <= AUTOMOD_CORRELATION_WINDOW_SECONDS
+            ):
+                return action
+        return None
 
     async def find_delete_executor(
         self, guild: discord.Guild, tracked: TrackedMessage
