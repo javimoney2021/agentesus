@@ -120,6 +120,13 @@ class ModerationProbe(commands.Cog):
         )
         self.prune_expired_automod_actions()
         self.recent_automod_actions.append(recent_action)
+        logger.warning(
+            "SONDA AutoMod recibido | regla=%s | usuario=%s | canal=%s | contenido=%r",
+            execution.rule_id,
+            execution.user_id,
+            execution.channel_id,
+            execution.content or "<contenido no disponible>",
+        )
 
         try:
             rule = await execution.fetch_rule()
@@ -163,13 +170,17 @@ class ModerationProbe(commands.Cog):
 
     async def log_deletion_after_audit(self, guild: discord.Guild, tracked: TrackedMessage):
         await asyncio.sleep(AUDIT_LOG_DELAY_SECONDS)
-        automod_action = self.find_matching_automod_action(tracked)
+        automod_action, content_matches = self.find_matching_automod_action(tracked)
         if automod_action is not None:
             executor = (
                 f"Discord AutoMod ({automod_action.rule_name}, "
                 f"accion={automod_action.action_name})"
             )
-            audit_status = "evento AutoMod correlacionado"
+            audit_status = (
+                "evento AutoMod correlacionado"
+                if content_matches
+                else "posible evento AutoMod: Discord no entrego el contenido"
+            )
         else:
             executor, found_in_audit = await self.find_delete_executor(guild, tracked)
             audit_status = (
@@ -191,7 +202,7 @@ class ModerationProbe(commands.Cog):
 
     def find_matching_automod_action(
         self, tracked: TrackedMessage
-    ) -> RecentAutoModAction | None:
+    ) -> tuple[RecentAutoModAction | None, bool]:
         self.prune_expired_automod_actions()
 
         for action in reversed(self.recent_automod_actions):
@@ -200,38 +211,46 @@ class ModerationProbe(commands.Cog):
                 action.guild_id == tracked.guild_id
                 and action.user_id == tracked.author_id
                 and action.channel_id == tracked.channel_id
-                and action.content == tracked.content
                 and seconds_apart <= AUTOMOD_CORRELATION_WINDOW_SECONDS
             ):
-                return action
-        return None
+                if action.content == tracked.content:
+                    return action, True
+                if not action.content:
+                    return action, False
+        return None, False
 
     async def find_delete_executor(
         self, guild: discord.Guild, tracked: TrackedMessage
     ) -> tuple[str, bool]:
-        try:
-            async for entry in guild.audit_logs(
-                limit=10, action=discord.AuditLogAction.message_delete
-            ):
-                entry_channel = getattr(entry.extra, "channel", None)
-                entry_channel_id = getattr(entry_channel, "id", None)
-                target_id = getattr(entry.target, "id", None)
-                age_seconds = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
-
-                if (
-                    target_id == tracked.author_id
-                    and entry_channel_id == tracked.channel_id
-                    and 0 <= age_seconds <= AUDIT_LOG_WINDOW_SECONDS
+        for attempt in range(3):
+            try:
+                async for entry in guild.audit_logs(
+                    limit=10, action=discord.AuditLogAction.message_delete
                 ):
-                    user = entry.user
-                    if user is None:
-                        return "desconocido", True
-                    actor_type = "bot" if user.bot else "moderador"
-                    return f"{user} ({user.id}, {actor_type})", True
-        except discord.Forbidden:
-            logger.warning("SONDA | sin View Audit Log en el servidor %s.", guild.id)
-        except discord.HTTPException:
-            logger.exception("SONDA | error al consultar Audit Logs en el servidor %s.", guild.id)
+                    entry_channel = getattr(entry.extra, "channel", None)
+                    entry_channel_id = getattr(entry_channel, "id", None)
+                    target_id = getattr(entry.target, "id", None)
+                    age_seconds = (datetime.now(timezone.utc) - entry.created_at).total_seconds()
+
+                    if (
+                        target_id == tracked.author_id
+                        and entry_channel_id == tracked.channel_id
+                        and 0 <= age_seconds <= AUDIT_LOG_WINDOW_SECONDS
+                    ):
+                        user = entry.user
+                        if user is None:
+                            return "desconocido", True
+                        actor_type = "bot" if user.bot else "moderador"
+                        return f"{user} ({user.id}, {actor_type})", True
+            except discord.Forbidden:
+                logger.warning("SONDA | sin View Audit Log en el servidor %s.", guild.id)
+                return "sin permiso para consultar auditoria", False
+            except discord.HTTPException:
+                logger.exception("SONDA | error al consultar Audit Logs en el servidor %s.", guild.id)
+                return "error al consultar auditoria", False
+
+            if attempt < 2:
+                await asyncio.sleep(1)
 
         return "no encontrado; posible autoeliminacion del autor", False
 
