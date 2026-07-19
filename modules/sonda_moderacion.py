@@ -62,6 +62,27 @@ class ModerationProbe(commands.Cog):
             task.cancel()
 
     @commands.Cog.listener()
+    async def on_ready(self):
+        for guild in self.bot.guilds:
+            member = guild.me
+            if member is None or self.bot.user is None:
+                continue
+
+            permissions = member.guild_permissions
+            logger.warning(
+                "SONDA estado | servidor=%s (%s) | ManageGuild=%s | ViewAuditLog=%s | "
+                "intents.messages=%s | intents.message_content=%s | "
+                "intents.auto_moderation_execution=%s",
+                guild.name,
+                guild.id,
+                permissions.manage_guild,
+                permissions.view_audit_log,
+                self.bot.intents.messages,
+                self.bot.intents.message_content,
+                self.bot.intents.auto_moderation_execution,
+            )
+
+    @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot or message.guild is None:
             return
