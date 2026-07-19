@@ -205,7 +205,7 @@ class ModerationProbe(commands.Cog):
         else:
             executor, found_in_audit = await self.find_delete_executor(guild, tracked)
             audit_status = (
-                "encontrada" if found_in_audit else "no encontrada (posible autoeliminacion)"
+                "encontrada" if found_in_audit else "no encontrada; Discord no atribuyo el borrado"
             )
 
         logger.warning(
@@ -273,7 +273,7 @@ class ModerationProbe(commands.Cog):
             if attempt < 2:
                 await asyncio.sleep(1)
 
-        return "no encontrado; posible autoeliminacion del autor", False
+        return "desconocido; sin evento AutoMod ni entrada Audit Log", False
 
 
 async def setup(bot: commands.Bot):
