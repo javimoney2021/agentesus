@@ -49,6 +49,17 @@ VERIFY_CHANNEL_ID = 1200056404208263219
 BLACKLIST_ALERT_CHANNEL_ID = 1466994193263231250
 BLACKLIST_ALERT_ROLE_ID = 1241815781453594678
 
+
+def env_int(name: str, default: int = 0) -> int:
+    value = os.getenv(name, str(default))
+    return int(value) if value.isdigit() else default
+
+
+# Registro de eventos. Deja ambos valores en 0 para desactivar esa accion.
+EVENT_REGISTRATION_ROLE_ID = env_int("EVENT_REGISTRATION_ROLE_ID")
+EVENT_REGISTRATION_CHANNEL_ID = env_int("EVENT_REGISTRATION_CHANNEL_ID")
+
+
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
 
 intents = discord.Intents.default()
@@ -56,6 +67,7 @@ intents.guilds = True
 intents.messages = True
 intents.message_content = True
 intents.members = True
+intents.auto_moderation_execution = True
 
 DB_NO_DISPONIBLE = "⚠️ La base de datos no está disponible temporalmente. Intenta de nuevo más tarde."
 

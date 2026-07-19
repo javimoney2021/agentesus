@@ -5,7 +5,7 @@ from discord.ext import commands, tasks
 
 from core.config import GUILD_ID, TOKEN, intents
 from core.database import init_db
-from modules import adivinar, posts, registros
+from modules import adivinar, posts, registro_eventos, registros, sonda_moderacion
 
 
 class MyBot(commands.Bot):
@@ -16,6 +16,8 @@ class MyBot(commands.Bot):
         registros.setup(self)
         posts.setup(self)
         adivinar.setup(self)
+        registro_eventos.setup(self)
+        await sonda_moderacion.setup(self)
 
         self.check_scheduled_posts_task.start()
 
