@@ -44,9 +44,16 @@ def env_int(name: str, default: int = 0) -> int:
     return int(value) if value.isdigit() else default
 
 
-# Registro de eventos. Deja ambos valores en 0 para desactivar esa accion.
-EVENT_REGISTRATION_ROLE_ID = env_int("EVENT_REGISTRATION_ROLE_ID")
-EVENT_REGISTRATION_CHANNEL_ID = env_int("EVENT_REGISTRATION_CHANNEL_ID")
+# Registro y gestion de eventos.
+EVENT_VERIFIED_ROLE_ID = 1409401827065204786
+EVENT_PARTICIPANT_ROLE_ID = 1528613617090429009
+EVENT_VERIFICATION_CHANNEL_ID = 1491206205648015360
+EVENT_ALLOWED_CHANNEL_IDS = frozenset({
+    1242886260461142116,
+    1528637027619180644,
+})
+EVENT_PARTICIPANT_LIMITS = (0, 10, 15, 20)
+EVENT_CATALOG_MAX_ITEMS = 25
 
 
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
