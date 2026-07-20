@@ -5,7 +5,7 @@ from discord.ext import commands, tasks
 
 from core.config import GUILD_ID, TOKEN, intents
 from core.database import init_db
-from modules import adivinar, posts, registro_eventos, registros, sonda_moderacion
+from modules import posts, registro_eventos, registros
 
 
 class MyBot(commands.Bot):
@@ -15,9 +15,7 @@ class MyBot(commands.Bot):
 
         registros.setup(self)
         posts.setup(self)
-        adivinar.setup(self)
         registro_eventos.setup(self)
-        await sonda_moderacion.setup(self)
 
         self.check_scheduled_posts_task.start()
 
@@ -59,13 +57,7 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    if await adivinar.handle_setup_message(bot, message):
-        return
-
     if await posts.handle_message(message):
-        return
-
-    if await adivinar.handle_guess_message(message):
         return
 
     await bot.process_commands(message)

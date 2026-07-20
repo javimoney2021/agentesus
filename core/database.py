@@ -12,6 +12,9 @@ async def init_db():
         bot_pool = await asyncpg.create_pool(DATABASE_URL)
         async with bot_pool.acquire() as conn:
             await conn.execute("""
+                -- Limpieza definitiva del sistema legacy de blacklist.
+                DROP TABLE IF EXISTS blacklist_ids;
+
                 CREATE TABLE IF NOT EXISTS registros (
                     user_id BIGINT PRIMARY KEY,
                     discord_tag TEXT NOT NULL,
@@ -32,12 +35,6 @@ async def init_db():
                     thread_name TEXT DEFAULT NULL,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 );
-                CREATE TABLE IF NOT EXISTS blacklist_ids (
-                    external_id TEXT PRIMARY KEY,
-                    nickname TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
             """)
         print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
         async with bot_pool.acquire() as conn:
@@ -46,19 +43,6 @@ async def init_db():
             """)
     except Exception as e:
         print(f"❌ Error conectando a la DB: {e}")
-
-
-async def upsert_registro(user, nickname, external_id):
-    async with bot_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO registros (user_id, discord_tag, nickname, external_id)
-            VALUES ($1, $2, $3, $4)
-            ON CONFLICT(user_id) DO UPDATE SET
-                discord_tag = excluded.discord_tag,
-                nickname = excluded.nickname,
-                external_id = excluded.external_id,
-                updated_at = CURRENT_TIMESTAMP
-        """, user.id, str(user), nickname, external_id)
 
 
 async def get_registro(user_id):
@@ -71,56 +55,12 @@ async def get_all_registros():
         return await conn.fetch("SELECT * FROM registros ORDER BY updated_at DESC")
 
 
-async def delete_registro(user_id: int):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetchrow("""
-            DELETE FROM registros
-            WHERE user_id=$1
-            RETURNING user_id, discord_tag, nickname, external_id
-        """, user_id)
-
-
 async def get_by_external_id(external_id: str):
     async with bot_pool.acquire() as conn:
         return await conn.fetch(
             "SELECT * FROM registros WHERE external_id=$1 ORDER BY updated_at DESC",
             external_id
         )
-
-
-async def add_blacklist_id(external_id: str, nickname: str | None = None):
-    async with bot_pool.acquire() as conn:
-        await conn.execute("""
-            INSERT INTO blacklist_ids (external_id, nickname)
-            VALUES ($1, $2)
-            ON CONFLICT (external_id) DO UPDATE SET
-                nickname = COALESCE(EXCLUDED.nickname, blacklist_ids.nickname),
-                updated_at = CURRENT_TIMESTAMP
-        """, external_id, nickname)
-
-
-async def get_blacklist_id(external_id: str):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetchrow(
-            "SELECT * FROM blacklist_ids WHERE external_id=$1",
-            external_id
-        )
-
-
-async def get_all_blacklist_ids():
-    async with bot_pool.acquire() as conn:
-        return await conn.fetch(
-            "SELECT * FROM blacklist_ids ORDER BY created_at ASC, external_id ASC"
-        )
-
-
-async def delete_blacklist_id(external_id: str):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetchrow("""
-            DELETE FROM blacklist_ids
-            WHERE external_id=$1
-            RETURNING external_id, nickname
-        """, external_id)
 
 
 async def add_scheduled_post(guild_id, channel_id, title, content, attachment_urls, scheduled_at, author_id, thread_name=None):
