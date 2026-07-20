@@ -7,13 +7,14 @@ from discord import app_commands
 
 from core import database
 from core.config import (
+    EVENT_ADMIN_ROLE_ID,
     EVENT_ALLOWED_CHANNEL_IDS,
     EVENT_CATALOG_MAX_ITEMS,
+    EVENT_PANEL_ROLE_NAME,
     EVENT_PARTICIPANT_LIMITS,
     EVENT_PARTICIPANT_ROLE_ID,
     EVENT_VERIFICATION_CHANNEL_ID,
     EVENT_VERIFIED_ROLE_ID,
-    is_staff,
     require_staff,
 )
 
@@ -22,6 +23,28 @@ logger = logging.getLogger(__name__)
 SPATIAL_ID_PATTERN = re.compile(r"^\d{7,10}$")
 USERS_PER_PAGE = 10
 PARTICIPANTS_PER_EMBED = 15
+EDIT_USERS_PER_PAGE = 20
+
+
+def has_role_id(member: discord.Member, role_id: int) -> bool:
+    return any(role.id == role_id for role in member.roles)
+
+
+def is_event_team(member: discord.Member) -> bool:
+    return any(role.name == EVENT_PANEL_ROLE_NAME for role in member.roles)
+
+
+def require_event_team():
+    async def predicate(interaction: discord.Interaction):
+        if isinstance(interaction.user, discord.Member) and is_event_team(interaction.user):
+            return True
+        await send_ephemeral(
+            interaction,
+            f"Solo el rol **{EVENT_PANEL_ROLE_NAME}** puede usar este comando.",
+        )
+        return False
+
+    return app_commands.check(predicate)
 
 
 def normalize_event_name(value: str) -> str:
@@ -103,6 +126,19 @@ class OwnerView(discord.ui.View):
         if interaction.user.id == self.owner_id:
             return True
         await send_ephemeral(interaction, "Este panel pertenece a otro usuario.")
+        return False
+
+
+class AdminOwnerView(OwnerView):
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not await super().interaction_check(interaction):
+            return False
+        if (
+            isinstance(interaction.user, discord.Member)
+            and has_role_id(interaction.user, EVENT_ADMIN_ROLE_ID)
+        ):
+            return True
+        await send_ephemeral(interaction, "Ya no posees el rol autorizado para administrar eventos.")
         return False
 
 
@@ -337,9 +373,16 @@ class StaffPanelView(discord.ui.View):
         self.manager = manager
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.guild and isinstance(interaction.user, discord.Member) and is_staff(interaction):
+        if (
+            interaction.guild
+            and isinstance(interaction.user, discord.Member)
+            and is_event_team(interaction.user)
+        ):
             return True
-        await send_ephemeral(interaction, "No tienes permisos para usar este panel.")
+        await send_ephemeral(
+            interaction,
+            f"Solo el rol **{EVENT_PANEL_ROLE_NAME}** puede usar este panel.",
+        )
         return False
 
     @discord.ui.button(
@@ -364,7 +407,7 @@ class StaffPanelView(discord.ui.View):
         custom_id="event_staff:finish:v2",
     )
     async def finish(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.manager.finish_event(interaction)
+        await self.manager.request_finish_confirmation(interaction)
 
     @discord.ui.button(
         label="Adm",
@@ -375,7 +418,37 @@ class StaffPanelView(discord.ui.View):
         await self.manager.open_admin(interaction)
 
 
-class AdminMenuView(OwnerView):
+class FinishConfirmationView(OwnerView):
+    def __init__(
+        self,
+        manager: "RegistroEventos",
+        owner_id: int,
+        event_id: int,
+        event_name: str,
+        panel_message: discord.Message,
+    ):
+        super().__init__(owner_id)
+        self.manager = manager
+        self.event_id = event_id
+        self.event_name = event_name
+        self.panel_message = panel_message
+
+    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.manager.finish_event(
+            interaction,
+            self.event_id,
+            self.panel_message,
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Finalización cancelada.", embed=None, view=None
+        )
+
+
+class AdminMenuView(AdminOwnerView):
     def __init__(self, manager: "RegistroEventos", owner_id: int):
         super().__init__(owner_id)
         self.manager = manager
@@ -393,6 +466,10 @@ class AdminMenuView(OwnerView):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await self.manager.open_database_records(interaction, self.owner_id)
+
+    @discord.ui.button(label="Editar registro", style=discord.ButtonStyle.secondary)
+    async def edit_record(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.manager.open_edit_records(interaction, self.owner_id)
 
 
 class AddEventModal(discord.ui.Modal, title="Agregar Evento"):
@@ -444,13 +521,13 @@ class RemoveEventSelect(discord.ui.Select):
         )
 
 
-class RemoveEventSelectionView(OwnerView):
+class RemoveEventSelectionView(AdminOwnerView):
     def __init__(self, manager: "RegistroEventos", owner_id: int, events):
         super().__init__(owner_id)
         self.add_item(RemoveEventSelect(manager, owner_id, events))
 
 
-class RemoveEventConfirmationView(OwnerView):
+class RemoveEventConfirmationView(AdminOwnerView):
     def __init__(
         self,
         manager: "RegistroEventos",
@@ -476,7 +553,89 @@ class RemoveEventConfirmationView(OwnerView):
         )
 
 
-class EventUsersPaginator(OwnerView):
+class EditEventUserModal(discord.ui.Modal):
+    def __init__(self, manager: "RegistroEventos", profile):
+        super().__init__(title="Editar Registro DB")
+        self.manager = manager
+        self.user_id = profile["user_id"]
+        self.nickname = discord.ui.TextInput(
+            label="Nickname",
+            default=profile["nickname"],
+            min_length=2,
+            max_length=32,
+            required=True,
+        )
+        self.spatial_id = discord.ui.TextInput(
+            label="ID Espacial",
+            default=profile["external_id"],
+            min_length=7,
+            max_length=10,
+            required=True,
+        )
+        self.country = discord.ui.TextInput(
+            label="Pais",
+            default=profile["country"],
+            min_length=2,
+            max_length=40,
+            required=True,
+        )
+        self.add_item(self.nickname)
+        self.add_item(self.spatial_id)
+        self.add_item(self.country)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.manager.edit_event_user_profile(
+            interaction,
+            self.user_id,
+            self.nickname.value,
+            self.spatial_id.value,
+            self.country.value,
+        )
+
+
+class EditEventUserSelect(discord.ui.Select):
+    def __init__(
+        self,
+        manager: "RegistroEventos",
+        owner_id: int,
+        page: int,
+        options: list[discord.SelectOption],
+    ):
+        self.manager = manager
+        self.owner_id = owner_id
+        self.page = page
+        super().__init__(
+            placeholder="Selecciona el registro a editar",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        if value.startswith("page:"):
+            await self.manager.show_edit_records_page(
+                interaction,
+                self.owner_id,
+                int(value.split(":", 1)[1]),
+            )
+            return
+        await self.manager.open_edit_record_modal(interaction, int(value))
+
+
+class EditEventUserSelectionView(AdminOwnerView):
+    def __init__(
+        self,
+        manager: "RegistroEventos",
+        owner_id: int,
+        page: int,
+        options: list[discord.SelectOption],
+    ):
+        super().__init__(owner_id)
+        self.add_item(EditEventUserSelect(manager, owner_id, page, options))
+
+
+class EventUsersPaginator(AdminOwnerView):
     def __init__(
         self,
         manager: "RegistroEventos",
@@ -513,6 +672,18 @@ class RegistroEventos:
         if self.database_ready():
             return True
         await send_ephemeral(interaction, "La base de datos no esta disponible.")
+        return False
+
+    async def require_event_admin(self, interaction: discord.Interaction) -> bool:
+        if (
+            isinstance(interaction.user, discord.Member)
+            and has_role_id(interaction.user, EVENT_ADMIN_ROLE_ID)
+        ):
+            return True
+        await send_ephemeral(
+            interaction,
+            "No posees el rol autorizado para entrar en la administración de eventos.",
+        )
         return False
 
     async def open_registration(self, interaction: discord.Interaction):
@@ -916,12 +1087,62 @@ class RegistroEventos:
             logger.exception("No se pudo actualizar el panel público del evento %s", event["id"])
             return False
 
-    async def finish_event(self, interaction: discord.Interaction):
+    async def request_finish_confirmation(self, interaction: discord.Interaction):
         if not interaction.guild or not await self.require_database(interaction):
             return
         event = await database.get_active_event(interaction.guild.id)
         if not event:
             await send_ephemeral(interaction, "No hay eventos activos.")
+            return
+        if interaction.message is None:
+            await send_ephemeral(interaction, "No se pudo identificar el panel de eventos.")
+            return
+
+        embed = discord.Embed(
+            title="Confirmar Finalización",
+            description=(
+                f"¿Deseas finalizar **{event['event_name']}**?\n\n"
+                "Se cerrarán las inscripciones, se publicará la lista final y se retirarán "
+                "los cargos después de 5 segundos."
+            ),
+            color=discord.Color.red(),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=FinishConfirmationView(
+                self,
+                interaction.user.id,
+                event["id"],
+                event["event_name"],
+                interaction.message,
+            ),
+            ephemeral=True,
+        )
+
+    async def finish_event(
+        self,
+        interaction: discord.Interaction,
+        expected_event_id: int,
+        panel_message: discord.Message,
+    ):
+        if (
+            not interaction.guild
+            or not isinstance(interaction.user, discord.Member)
+            or not is_event_team(interaction.user)
+        ):
+            await send_ephemeral(
+                interaction,
+                f"Solo el rol **{EVENT_PANEL_ROLE_NAME}** puede finalizar eventos.",
+            )
+            return
+        if not await self.require_database(interaction):
+            return
+
+        event = await database.get_active_event(interaction.guild.id)
+        if not event or event["id"] != expected_event_id:
+            await interaction.response.edit_message(
+                content="Este evento ya no está activo.", embed=None, view=None
+            )
             return
         if interaction.guild.id in self.finishing_guilds:
             await send_ephemeral(interaction, "Este evento ya se esta finalizando.")
@@ -929,36 +1150,64 @@ class RegistroEventos:
 
         self.finishing_guilds.add(interaction.guild.id)
         try:
-            await self._finish_event(interaction, event)
+            await self._finish_event(interaction, event, panel_message)
         finally:
             self.finishing_guilds.discard(interaction.guild.id)
 
-    async def _finish_event(self, interaction: discord.Interaction, event):
+    async def _finish_event(
+        self,
+        interaction: discord.Interaction,
+        event,
+        panel_message: discord.Message,
+    ):
+        await interaction.response.defer(ephemeral=True)
+
+        if event["status"] == "open":
+            event = await database.close_active_event(interaction.guild.id)
+            if event is None:
+                event = await database.get_active_event(interaction.guild.id)
+        if not event:
+            await interaction.edit_original_response(
+                content="El evento ya no está activo.", embed=None, view=None
+            )
+            return
+
+        await self.update_registration_message(event, closed=True)
         participants = await database.get_event_participants(event["id"])
 
-        await interaction.response.defer()
-        if participants:
-            for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
-                chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
-                lines = [
-                    f"**{row['position']}.** <@{row['user_id']}> | "
-                    f"{row['nickname']} | ID: {row['external_id']}"
-                    for row in chunk
-                ]
-                embed = discord.Embed(
-                    title=f"Registro Final - {event['event_name']}",
-                    description="\n".join(lines),
-                    color=discord.Color.gold(),
+        try:
+            if participants:
+                for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
+                    chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
+                    lines = [
+                        f"**{row['position']}.** <@{row['user_id']}> | "
+                        f"{row['nickname']} | ID: {row['external_id']}"
+                        for row in chunk
+                    ]
+                    embed = discord.Embed(
+                        title=f"Registro Final - {event['event_name']}",
+                        description="\n".join(lines),
+                        color=discord.Color.gold(),
+                    )
+                    embed.set_footer(text=f"Total de participantes: {len(participants)}")
+                    await interaction.channel.send(embed=embed)
+            else:
+                await interaction.channel.send(
+                    f"**{event['event_name']}** finalizó sin participantes registrados."
                 )
-                embed.set_footer(text=f"Total de participantes: {len(participants)}")
-                await interaction.followup.send(embed=embed)
-        else:
-            await interaction.followup.send(
-                f"**{event['event_name']}** finalizó sin participantes registrados."
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            logger.exception("No se pudo publicar la lista final del evento %s", event["id"])
+            await interaction.edit_original_response(
+                content=(
+                    "No se pudo publicar la lista final. El evento quedó cerrado, pero no "
+                    "se retiraron cargos ni se limpiaron inscripciones."
+                ),
+                embed=None,
+                view=None,
             )
+            return
 
         await asyncio.sleep(5)
-        await self.update_registration_message(event, closed=True)
         role = interaction.guild.get_role(EVENT_PARTICIPANT_ROLE_ID)
         role_failures = 0
         if role:
@@ -969,7 +1218,9 @@ class RegistroEventos:
                         member = await interaction.guild.fetch_member(row["user_id"])
                     except (discord.NotFound, discord.Forbidden, discord.HTTPException):
                         member = None
-                if member and role in member.roles:
+                if member is None:
+                    role_failures += 1
+                elif role in member.roles:
                     if not await self.remove_role_safely(member, role):
                         role_failures += 1
         elif participants:
@@ -979,13 +1230,21 @@ class RegistroEventos:
             await database.delete_event(event["id"])
         except Exception:
             logger.exception("No se pudo limpiar el evento finalizado %s", event["id"])
-            await interaction.followup.send(
-                "Los cargos fueron procesados, pero no se pudo limpiar el evento en la DB. "
-                "Puedes intentar **Finalizar Evento** nuevamente."
+            await interaction.edit_original_response(
+                content=(
+                    "Los cargos fueron procesados, pero no se pudo limpiar el evento en la DB. "
+                    "Puedes intentar **Finalizar Evento** nuevamente."
+                ),
+                embed=None,
+                view=None,
             )
             return
+
+        for key, lock in list(self.registration_locks.items()):
+            if key[0] == interaction.guild.id and not lock.locked():
+                self.registration_locks.pop(key, None)
         try:
-            await interaction.message.edit(
+            await panel_message.edit(
                 embed=staff_panel_embed(None), view=StaffPanelView(self)
             )
         except (discord.NotFound, discord.HTTPException):
@@ -994,9 +1253,11 @@ class RegistroEventos:
         summary = f"Evento **{event['event_name']}** finalizado y lista activa limpiada."
         if role_failures:
             summary += f" No se pudo retirar el rol a {role_failures} participante(s)."
-        await interaction.followup.send(summary)
+        await interaction.edit_original_response(content=summary, embed=None, view=None)
 
     async def open_admin(self, interaction: discord.Interaction):
+        if not await self.require_event_admin(interaction):
+            return
         embed = discord.Embed(
             title="Administración de Eventos",
             description="Selecciona una opción de gestión.",
@@ -1009,7 +1270,11 @@ class RegistroEventos:
         )
 
     async def add_catalog_event(self, interaction: discord.Interaction, raw_name: str):
-        if not interaction.guild or not await self.require_database(interaction):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
             return
         name = normalize_event_name(raw_name)
         if len(name) < 2:
@@ -1028,6 +1293,152 @@ class RegistroEventos:
             "full": f"El catálogo alcanzó su limite de {EVENT_CATALOG_MAX_ITEMS} eventos.",
         }
         await send_ephemeral(interaction, messages.get(status, "No se pudo agregar el evento."))
+
+    async def open_edit_records(self, interaction: discord.Interaction, owner_id: int):
+        await self.show_edit_records_page(interaction, owner_id, 0)
+
+    async def show_edit_records_page(
+        self,
+        interaction: discord.Interaction,
+        owner_id: int,
+        page: int,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+
+        total = await database.get_event_user_count(interaction.guild.id)
+        if total == 0:
+            await interaction.response.edit_message(
+                content="No hay registros para editar.", embed=None, view=None
+            )
+            return
+
+        max_page = max(0, (total - 1) // EDIT_USERS_PER_PAGE)
+        page = min(max(page, 0), max_page)
+        rows = await database.get_event_users_page(
+            interaction.guild.id,
+            EDIT_USERS_PER_PAGE,
+            page * EDIT_USERS_PER_PAGE,
+        )
+        options = []
+        for row in rows:
+            member = interaction.guild.get_member(row["user_id"])
+            if member is not None:
+                discord_nick = member.nick or member.name
+            else:
+                discord_nick = row["discord_tag"]
+            options.append(
+                discord.SelectOption(
+                    label=str(discord_nick)[:100],
+                    value=str(row["user_id"]),
+                    description=(
+                        f"{row['nickname']} | ID {row['external_id']}"
+                    )[:100],
+                )
+            )
+
+        if page > 0:
+            options.append(
+                discord.SelectOption(
+                    label="Volver a los 20 registros anteriores",
+                    value=f"page:{page - 1}",
+                )
+            )
+        if (page + 1) * EDIT_USERS_PER_PAGE < total:
+            options.append(
+                discord.SelectOption(
+                    label="Ver los siguientes 20 registros",
+                    value=f"page:{page + 1}",
+                )
+            )
+
+        embed = discord.Embed(
+            title="Editar registro",
+            description=(
+                "Selecciona un usuario por su nickname de Discord.\n"
+                f"Página **{page + 1}/{max_page + 1}**"
+            ),
+            color=discord.Color.orange(),
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=EditEventUserSelectionView(
+                self,
+                owner_id,
+                page,
+                options,
+            ),
+        )
+
+    async def open_edit_record_modal(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+        profile = await database.get_event_user(interaction.guild.id, user_id)
+        if not profile:
+            await send_ephemeral(interaction, "Ese registro ya no existe.")
+            return
+        await interaction.response.send_modal(EditEventUserModal(self, profile))
+
+    async def edit_event_user_profile(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        raw_nickname: str,
+        raw_spatial_id: str,
+        raw_country: str,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+
+        nickname = raw_nickname.strip()
+        spatial_id = raw_spatial_id.strip()
+        country = raw_country.strip()
+        if len(nickname) < 2 or len(country) < 2:
+            await send_ephemeral(
+                interaction,
+                "Nickname y Pais deben contener al menos 2 caracteres visibles.",
+            )
+            return
+        if not SPATIAL_ID_PATTERN.fullmatch(spatial_id):
+            await send_ephemeral(
+                interaction,
+                "La ID Espacial debe contener solamente entre 7 y 10 numeros.",
+            )
+            return
+
+        status, profile = await database.update_event_user_profile(
+            interaction.guild.id,
+            user_id,
+            nickname,
+            spatial_id,
+            country,
+        )
+        messages = {
+            "updated": f"Registro de <@{user_id}> actualizado correctamente.",
+            "external_id_duplicate": "Esa ID Espacial ya pertenece a otro usuario.",
+            "missing": "El registro ya no existe.",
+        }
+        await send_ephemeral(
+            interaction,
+            messages.get(status, "No se pudo actualizar el registro."),
+        )
 
     async def open_remove_event(self, interaction: discord.Interaction, owner_id: int):
         if not interaction.guild or not await self.require_database(interaction):
@@ -1129,8 +1540,8 @@ def setup(bot):
 
     @bot.tree.command(
         name="panel_eventos",
-        description="(Staff) Abre el panel de gerenciamiento de eventos.",
+        description="(Equipo de Eventos) Abre el panel de gerenciamiento.",
     )
-    @require_staff()
+    @require_event_team()
     async def panel_eventos(interaction: discord.Interaction):
         await registro_eventos.show_staff_panel(interaction)

@@ -242,12 +242,14 @@ async def delete_event(event_id: int):
 
 async def close_active_event(guild_id: int):
     async with bot_pool.acquire() as conn:
-        return await conn.fetchrow("""
-            UPDATE event_instances
-            SET status='closed', closed_at=CURRENT_TIMESTAMP
-            WHERE guild_id=$1 AND status='open'
-            RETURNING *
-        """, guild_id)
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", guild_id)
+            return await conn.fetchrow("""
+                UPDATE event_instances
+                SET status='closed', closed_at=CURRENT_TIMESTAMP
+                WHERE guild_id=$1 AND status='open'
+                RETURNING *
+            """, guild_id)
 
 
 async def get_event_user(guild_id: int, user_id: int):
@@ -273,6 +275,44 @@ async def get_event_users_page(guild_id: int, limit: int, offset: int):
             ORDER BY updated_at DESC, user_id ASC
             LIMIT $2 OFFSET $3
         """, guild_id, limit, offset)
+
+
+async def update_event_user_profile(
+    guild_id: int,
+    user_id: int,
+    nickname: str,
+    external_id: str,
+    country: str,
+):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", guild_id)
+            profile = await conn.fetchrow("""
+                SELECT * FROM event_users
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+            if not profile:
+                return "missing", None
+
+            duplicate = await conn.fetchval("""
+                SELECT EXISTS(
+                    SELECT 1 FROM event_users
+                    WHERE guild_id=$1 AND external_id=$2 AND user_id<>$3
+                )
+            """, guild_id, external_id, user_id)
+            if duplicate:
+                return "external_id_duplicate", None
+
+            updated = await conn.fetchrow("""
+                UPDATE event_users
+                SET nickname=$3,
+                    external_id=$4,
+                    country=$5,
+                    updated_at=CURRENT_TIMESTAMP
+                WHERE guild_id=$1 AND user_id=$2
+                RETURNING *
+            """, guild_id, user_id, nickname, external_id, country)
+            return "updated", updated
 
 
 async def get_event_registration(event_id: int, user_id: int):
