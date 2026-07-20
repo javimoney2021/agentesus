@@ -975,14 +975,9 @@ class RegistroEventos:
             return
 
         if status == "registered":
-            registration = result["registration"]
-            suffix = (
-                " Quedaste registrado fuera de la lista principal."
-                if registration["is_overflow"]
-                else ""
-            )
             await interaction.followup.send(
-                f"Registro exitoso. Tu posición es **{registration['position']}**.{suffix}",
+                f"Inscripción al Evento **{result['event']['event_name']}** Exitosa, "
+                "Asegúrate de llegar Puntual. 🎉",
                 ephemeral=True,
             )
             return
@@ -1036,7 +1031,7 @@ class RegistroEventos:
         for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
             chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
             lines = [
-                f"**{row['position']}.** {row['nickname']}"
+                f"**{row['position']}.** {row['nickname']} | ID: {row['external_id']}"
                 + (" ❎" if row["is_overflow"] else "")
                 for row in chunk
             ]
