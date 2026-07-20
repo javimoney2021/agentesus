@@ -24,6 +24,14 @@ SPATIAL_ID_PATTERN = re.compile(r"^\d{7,10}$")
 USERS_PER_PAGE = 10
 PARTICIPANTS_PER_EMBED = 15
 EDIT_USERS_PER_PAGE = 20
+STAFF_PANEL_THUMBNAIL_URL = (
+    "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
+    "Purple%20jack%20Harcode/Kill.png"
+)
+ADMIN_PANEL_THUMBNAIL_URL = (
+    "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
+    "Purple%20jack%20Harcode/Inge%20thumb.png"
+)
 
 
 def has_role_id(member: discord.Member, role_id: int) -> bool:
@@ -113,6 +121,7 @@ def staff_panel_embed(active_event) -> discord.Embed:
         description=description,
         color=discord.Color.blue(),
     )
+    embed.set_thumbnail(url=STAFF_PANEL_THUMBNAIL_URL)
     embed.set_footer(text="Escoja una opción abajo...")
     return embed
 
@@ -386,7 +395,7 @@ class StaffPanelView(discord.ui.View):
         return False
 
     @discord.ui.button(
-        label="Ver participantes",
+        label="👨‍👦‍👦 Ver Participantes",
         style=discord.ButtonStyle.primary,
         custom_id="event_staff:participants:v2",
     )
@@ -394,7 +403,7 @@ class StaffPanelView(discord.ui.View):
         await self.manager.show_participants(interaction)
 
     @discord.ui.button(
-        label="Cerrar Inscripciones",
+        label="🔒 Cerrar Inscripciones",
         style=discord.ButtonStyle.secondary,
         custom_id="event_staff:close:v2",
     )
@@ -402,7 +411,7 @@ class StaffPanelView(discord.ui.View):
         await self.manager.close_registration(interaction)
 
     @discord.ui.button(
-        label="Finalizar Evento",
+        label="📍 Finalizar Evento",
         style=discord.ButtonStyle.danger,
         custom_id="event_staff:finish:v2",
     )
@@ -410,7 +419,7 @@ class StaffPanelView(discord.ui.View):
         await self.manager.request_finish_confirmation(interaction)
 
     @discord.ui.button(
-        label="Adm",
+        label="⚙️ ADM",
         style=discord.ButtonStyle.success,
         custom_id="event_staff:admin:v2",
     )
@@ -1263,6 +1272,7 @@ class RegistroEventos:
             description="Selecciona una opción de gestión.",
             color=discord.Color.orange(),
         )
+        embed.set_thumbnail(url=ADMIN_PANEL_THUMBNAIL_URL)
         await interaction.response.send_message(
             embed=embed,
             view=AdminMenuView(self, interaction.user.id),
