@@ -485,6 +485,10 @@ class AdminMenuView(AdminOwnerView):
     async def edit_record(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.manager.open_edit_records(interaction, self.owner_id)
 
+    @discord.ui.button(label="Eliminar Registro", style=discord.ButtonStyle.danger)
+    async def delete_record(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.manager.open_delete_records(interaction, self.owner_id)
+
 
 class AddEventModal(discord.ui.Modal, title="Agregar Evento"):
     event_name = discord.ui.TextInput(
@@ -647,6 +651,77 @@ class EditEventUserSelectionView(AdminOwnerView):
     ):
         super().__init__(owner_id)
         self.add_item(EditEventUserSelect(manager, owner_id, page, options))
+
+
+class DeleteEventUserSelect(discord.ui.Select):
+    def __init__(
+        self,
+        manager: "RegistroEventos",
+        owner_id: int,
+        options: list[discord.SelectOption],
+    ):
+        self.manager = manager
+        self.owner_id = owner_id
+        super().__init__(
+            placeholder="Selecciona el registro a eliminar",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        value = self.values[0]
+        if value.startswith("page:"):
+            await self.manager.show_delete_records_page(
+                interaction,
+                self.owner_id,
+                int(value.split(":", 1)[1]),
+            )
+            return
+        await self.manager.open_delete_record_confirmation(
+            interaction,
+            self.owner_id,
+            int(value),
+        )
+
+
+class DeleteEventUserSelectionView(AdminOwnerView):
+    def __init__(
+        self,
+        manager: "RegistroEventos",
+        owner_id: int,
+        options: list[discord.SelectOption],
+    ):
+        super().__init__(owner_id)
+        self.add_item(DeleteEventUserSelect(manager, owner_id, options))
+
+
+class DeleteEventUserConfirmationView(AdminOwnerView):
+    def __init__(
+        self,
+        manager: "RegistroEventos",
+        owner_id: int,
+        user_id: int,
+        display_name: str,
+    ):
+        super().__init__(owner_id)
+        self.manager = manager
+        self.user_id = user_id
+        self.display_name = display_name
+
+    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.manager.delete_event_user_record(
+            interaction,
+            self.user_id,
+            self.display_name,
+        )
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="Eliminación cancelada.", embed=None, view=None
+        )
 
 
 class EventUsersPaginator(AdminOwnerView):
@@ -1487,6 +1562,157 @@ class RegistroEventos:
         await send_ephemeral(
             interaction,
             messages.get(status, "No se pudo actualizar el registro."),
+        )
+
+    async def open_delete_records(self, interaction: discord.Interaction, owner_id: int):
+        await self.show_delete_records_page(interaction, owner_id, 0)
+
+    async def show_delete_records_page(
+        self,
+        interaction: discord.Interaction,
+        owner_id: int,
+        page: int,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+
+        total = await database.get_event_user_count(interaction.guild.id)
+        if total == 0:
+            await interaction.response.edit_message(
+                content="No hay registros para eliminar.", embed=None, view=None
+            )
+            return
+
+        max_page = max(0, (total - 1) // EDIT_USERS_PER_PAGE)
+        page = min(max(page, 0), max_page)
+        rows = await database.get_event_users_page(
+            interaction.guild.id,
+            EDIT_USERS_PER_PAGE,
+            page * EDIT_USERS_PER_PAGE,
+        )
+        options = []
+        for row in rows:
+            member = interaction.guild.get_member(row["user_id"])
+            if member is not None:
+                discord_nick = member.nick or member.name
+            else:
+                discord_nick = row["discord_tag"]
+            options.append(
+                discord.SelectOption(
+                    label=str(discord_nick)[:100],
+                    value=str(row["user_id"]),
+                    description=(
+                        f"{row['nickname']} | ID {row['external_id']}"
+                    )[:100],
+                )
+            )
+
+        if page > 0:
+            options.append(
+                discord.SelectOption(
+                    label="Volver a los 20 registros anteriores",
+                    value=f"page:{page - 1}",
+                )
+            )
+        if (page + 1) * EDIT_USERS_PER_PAGE < total:
+            options.append(
+                discord.SelectOption(
+                    label="Ver los siguientes 20 registros",
+                    value=f"page:{page + 1}",
+                )
+            )
+
+        embed = discord.Embed(
+            title="Eliminar Registro",
+            description=(
+                "Selecciona un usuario por su nickname de Discord.\n"
+                f"Página **{page + 1}/{max_page + 1}**"
+            ),
+            color=discord.Color.red(),
+        )
+        await interaction.response.edit_message(
+            content=None,
+            embed=embed,
+            view=DeleteEventUserSelectionView(self, owner_id, options),
+        )
+
+    async def open_delete_record_confirmation(
+        self,
+        interaction: discord.Interaction,
+        owner_id: int,
+        user_id: int,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+        profile = await database.get_event_user(interaction.guild.id, user_id)
+        if not profile:
+            await interaction.response.edit_message(
+                content="Ese registro ya no existe.", embed=None, view=None
+            )
+            return
+
+        member = interaction.guild.get_member(user_id)
+        display_name = (
+            member.nick or member.name
+            if member is not None
+            else profile["discord_tag"]
+        )
+        embed = discord.Embed(
+            title="Confirmar Eliminación de Registro",
+            description=(
+                f"¿Deseas eliminar permanentemente el registro de **{display_name}**?\n\n"
+                f"Nickname: **{profile['nickname']}**\n"
+                f"ID Espacial: **{profile['external_id']}**\n"
+                f"Pais: **{profile['country']}**"
+            ),
+            color=discord.Color.red(),
+        )
+        await interaction.response.edit_message(
+            embed=embed,
+            view=DeleteEventUserConfirmationView(
+                self,
+                owner_id,
+                user_id,
+                str(display_name),
+            ),
+        )
+
+    async def delete_event_user_record(
+        self,
+        interaction: discord.Interaction,
+        user_id: int,
+        display_name: str,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+        status, profile = await database.delete_event_user_profile(
+            interaction.guild.id,
+            user_id,
+        )
+        messages = {
+            "deleted": f"Registro de **{display_name}** eliminado de la DB.",
+            "active_registration": (
+                "No se puede eliminar este registro mientras el usuario esté inscrito "
+                "en el evento activo."
+            ),
+            "missing": "El registro ya no existe.",
+        }
+        await interaction.response.edit_message(
+            content=messages.get(status, "No se pudo eliminar el registro."),
+            embed=None,
+            view=None,
         )
 
     async def open_remove_event(self, interaction: discord.Interaction, owner_id: int):
