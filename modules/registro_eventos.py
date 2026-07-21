@@ -32,6 +32,14 @@ ADMIN_PANEL_THUMBNAIL_URL = (
     "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
     "Purple%20jack%20Harcode/Inge%20thumb.png"
 )
+PARTICIPANTS_THUMBNAIL_URL = (
+    "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
+    "Purple%20jack%20Harcode/participantes.png"
+)
+FINAL_PARTICIPANTS_THUMBNAIL_URL = (
+    "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
+    "Purple%20jack%20Harcode/FInal.png"
+)
 
 
 def has_role_id(member: discord.Member, role_id: int) -> bool:
@@ -1159,6 +1167,7 @@ class RegistroEventos:
                 description="\n".join(lines),
                 color=discord.Color.blue(),
             )
+            embed.set_thumbnail(url=PARTICIPANTS_THUMBNAIL_URL)
             embed.set_footer(text=f"Total de inscritos: {len(participants)}")
             await interaction.followup.send(embed=embed)
 
@@ -1304,7 +1313,7 @@ class RegistroEventos:
                     chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
                     lines = [
                         f"**{row['position']}.** <@{row['user_id']}> | "
-                        f"{row['nickname']} | ID: {row['external_id']}"
+                        f"{row['nickname']}\t{row['external_id']}"
                         for row in chunk
                     ]
                     embed = discord.Embed(
@@ -1312,6 +1321,7 @@ class RegistroEventos:
                         description="\n".join(lines),
                         color=discord.Color.gold(),
                     )
+                    embed.set_thumbnail(url=FINAL_PARTICIPANTS_THUMBNAIL_URL)
                     embed.set_footer(text=f"Total de participantes: {len(participants)}")
                     await interaction.channel.send(embed=embed)
             else:
