@@ -304,11 +304,11 @@ class ExistingProfileView(OwnerView):
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
         await interaction.response.defer(ephemeral=True)
-        try:
-            await interaction.delete_original_response()
-        except (discord.NotFound, discord.HTTPException):
-            pass
-        await self.manager.complete_registration(interaction, self.profile)
+        await self.manager.complete_registration(
+            interaction,
+            self.profile,
+            delete_source_on_success=True,
+        )
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -678,6 +678,7 @@ class RegistroEventos:
         self.bot = bot
         self.registration_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.finishing_guilds: set[int] = set()
+        self.background_tasks: set[asyncio.Task] = set()
 
     def database_ready(self) -> bool:
         return database.bot_pool is not None
@@ -896,7 +897,13 @@ class RegistroEventos:
             "todas formas? Seras considerado en caso falte algun jugador de la lista inicial..."
         )
 
-    async def complete_registration(self, interaction: discord.Interaction, profile):
+    async def complete_registration(
+        self,
+        interaction: discord.Interaction,
+        profile,
+        *,
+        delete_source_on_success: bool = False,
+    ):
         if not interaction.guild or not isinstance(interaction.user, discord.Member):
             await send_ephemeral(interaction, "No se pudo identificar al miembro.")
             return
@@ -909,12 +916,22 @@ class RegistroEventos:
         lock = self.registration_locks.setdefault(key, asyncio.Lock())
         try:
             async with lock:
-                await self._complete_registration(interaction, profile)
+                await self._complete_registration(
+                    interaction,
+                    profile,
+                    delete_source_on_success=delete_source_on_success,
+                )
         finally:
             if not lock.locked():
                 self.registration_locks.pop(key, None)
 
-    async def _complete_registration(self, interaction: discord.Interaction, profile):
+    async def _complete_registration(
+        self,
+        interaction: discord.Interaction,
+        profile,
+        *,
+        delete_source_on_success: bool,
+    ):
         guild = interaction.guild
         member = interaction.user
         verified_role = guild.get_role(EVENT_VERIFIED_ROLE_ID)
@@ -982,12 +999,18 @@ class RegistroEventos:
             return
 
         if status == "registered":
-            await interaction.followup.send(
+            success_message = await interaction.followup.send(
                 f"Inscripción al Evento **{result['event']['event_name']}** Exitosa, "
                 "Asegúrate de llegar Puntual. 🎉",
                 ephemeral=True,
-                delete_after=10,
+                wait=True,
             )
+            if delete_source_on_success:
+                try:
+                    await interaction.delete_original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            self.schedule_message_deletion(success_message, 10)
             return
 
         if status == "duplicate":
@@ -1004,6 +1027,19 @@ class RegistroEventos:
         await interaction.followup.send(
             messages.get(status, "No se pudo completar la inscripción."), ephemeral=True
         )
+
+    def schedule_message_deletion(self, message, delay: float):
+        task = asyncio.create_task(self.delete_message_later(message, delay))
+        self.background_tasks.add(task)
+        task.add_done_callback(self.background_tasks.discard)
+
+    @staticmethod
+    async def delete_message_later(message, delay: float):
+        await asyncio.sleep(delay)
+        try:
+            await message.delete()
+        except (discord.NotFound, discord.HTTPException):
+            pass
 
     @staticmethod
     async def remove_role_safely(member: discord.Member, role: discord.Role) -> bool:
@@ -1128,7 +1164,7 @@ class RegistroEventos:
                 event["event_name"],
                 interaction.message,
             ),
-            ephemeral=True,
+            ephemeral=False,
         )
 
     async def finish_event(
@@ -1172,7 +1208,7 @@ class RegistroEventos:
         event,
         panel_message: discord.Message,
     ):
-        await interaction.response.defer(ephemeral=True)
+        await interaction.response.defer(ephemeral=False)
 
         if event["status"] == "open":
             event = await database.close_active_event(interaction.guild.id)
