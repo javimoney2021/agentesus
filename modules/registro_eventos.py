@@ -1367,10 +1367,8 @@ class RegistroEventos:
             if key[0] == interaction.guild.id and not lock.locked():
                 self.registration_locks.pop(key, None)
         try:
-            await panel_message.edit(
-                embed=staff_panel_embed(None), view=StaffPanelView(self)
-            )
-        except (discord.NotFound, discord.HTTPException):
+            await panel_message.delete()
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
         summary = f"Evento **{event['event_name']}** finalizado y lista activa limpiada."
