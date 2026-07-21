@@ -903,7 +903,8 @@ class RegistroEventos:
         if not await self.require_database(interaction):
             return
 
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         key = (interaction.guild.id, interaction.user.id)
         lock = self.registration_locks.setdefault(key, asyncio.Lock())
         try:
