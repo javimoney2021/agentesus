@@ -303,6 +303,11 @@ class ExistingProfileView(OwnerView):
     async def continue_registration(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ):
+        await interaction.response.defer(ephemeral=True)
+        try:
+            await interaction.delete_original_response()
+        except (discord.NotFound, discord.HTTPException):
+            pass
         await self.manager.complete_registration(interaction, self.profile)
 
     @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
@@ -759,7 +764,8 @@ class RegistroEventos:
             await send_ephemeral(interaction, "No se pudo identificar el canal del evento.")
             return
 
-        await interaction.response.defer(ephemeral=True)
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
         status, event = await database.create_active_event(
             interaction.guild.id,
             event_id,
@@ -979,6 +985,7 @@ class RegistroEventos:
                 f"Inscripción al Evento **{result['event']['event_name']}** Exitosa, "
                 "Asegúrate de llegar Puntual. 🎉",
                 ephemeral=True,
+                delete_after=10,
             )
             return
 
