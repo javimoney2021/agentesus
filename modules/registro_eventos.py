@@ -1311,14 +1311,23 @@ class RegistroEventos:
             if participants:
                 for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
                     chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
-                    lines = [
-                        f"**{row['position']}.** <@{row['user_id']}> | "
-                        f"{row['nickname']}\t{row['external_id']}"
-                        for row in chunk
-                    ]
+                    lines = []
+                    for row in chunk:
+                        member = interaction.guild.get_member(row["user_id"])
+                        discord_name = (
+                            member.display_name
+                            if member is not None
+                            else row["discord_tag"]
+                        )
+                        discord_name = str(discord_name).replace("`", "'").replace("\t", " ")
+                        nickname = str(row["nickname"]).replace("`", "'").replace("\t", " ")
+                        lines.append(
+                            f"{row['position']}. @{discord_name} | "
+                            f"{nickname}\t{row['external_id']}"
+                        )
                     embed = discord.Embed(
                         title=f"Registro Final - {event['event_name']}",
-                        description="\n".join(lines),
+                        description=f"```\n{'\n'.join(lines)}\n```",
                         color=discord.Color.gold(),
                     )
                     embed.set_thumbnail(url=FINAL_PARTICIPANTS_THUMBNAIL_URL)
