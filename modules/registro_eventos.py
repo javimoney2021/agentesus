@@ -1158,7 +1158,8 @@ class RegistroEventos:
         for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
             chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
             lines = [
-                f"**{row['position']}.** {row['nickname']} | ID: {row['external_id']}"
+                f"**{row['position']}.** <@{row['user_id']}> | "
+                f"{row['nickname']} | ID: {row['external_id']} | Pais: {row['country']}"
                 + (" ❎" if row["is_overflow"] else "")
                 for row in chunk
             ]
