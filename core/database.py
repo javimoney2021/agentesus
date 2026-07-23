@@ -326,21 +326,60 @@ async def delete_event_user_profile(guild_id: int, user_id: int):
             if not profile:
                 return "missing", None
 
-            participating = await conn.fetchval("""
-                SELECT EXISTS(
-                    SELECT 1 FROM event_registrations
-                    WHERE guild_id=$1 AND user_id=$2
-                )
+            affected_events = await conn.fetch("""
+                SELECT
+                    e.id,
+                    e.event_name,
+                    e.participant_limit
+                FROM event_registrations AS r
+                JOIN event_instances AS e ON e.id=r.event_id
+                WHERE r.guild_id=$1 AND r.user_id=$2
+                FOR UPDATE OF e
             """, guild_id, user_id)
-            if participating:
-                return "active_registration", profile
+
+            await conn.execute("""
+                DELETE FROM event_registrations
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+
+            for event in affected_events:
+                event_id = event["id"]
+                participant_limit = event["participant_limit"]
+                await conn.execute("""
+                    UPDATE event_registrations
+                    SET position=-position
+                    WHERE event_id=$1
+                """, event_id)
+                await conn.execute("""
+                    WITH ordered AS (
+                        SELECT
+                            user_id,
+                            ROW_NUMBER() OVER (
+                                ORDER BY -position ASC, registered_at ASC, user_id ASC
+                            )::INTEGER AS new_position
+                        FROM event_registrations
+                        WHERE event_id=$1
+                    )
+                    UPDATE event_registrations AS r
+                    SET
+                        position=ordered.new_position,
+                        is_overflow=(
+                            $2::INTEGER > 0
+                            AND ordered.new_position > $2::INTEGER
+                        )
+                    FROM ordered
+                    WHERE r.event_id=$1 AND r.user_id=ordered.user_id
+                """, event_id, participant_limit)
 
             deleted = await conn.fetchrow("""
                 DELETE FROM event_users
                 WHERE guild_id=$1 AND user_id=$2
                 RETURNING *
             """, guild_id, user_id)
-            return "deleted", deleted
+            return "deleted", {
+                "profile": deleted,
+                "affected_events": affected_events,
+            }
 
 
 async def get_event_registration(event_id: int, user_id: int):

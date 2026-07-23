@@ -1661,9 +1661,10 @@ class RegistroEventos:
             or not await self.require_database(interaction)
         ):
             return
+        await interaction.response.defer()
         profile = await database.get_event_user(interaction.guild.id, user_id)
         if not profile:
-            await interaction.response.edit_message(
+            await interaction.edit_original_response(
                 content="Ese registro ya no existe.", embed=None, view=None
             )
             return
@@ -1674,6 +1675,18 @@ class RegistroEventos:
             if member is not None
             else profile["discord_tag"]
         )
+        active_event = await database.get_active_event(interaction.guild.id)
+        active_registration = (
+            await database.get_event_registration(active_event["id"], user_id)
+            if active_event
+            else None
+        )
+        active_warning = ""
+        if active_registration:
+            active_warning = (
+                f"\n\n⚠️ También se eliminará su inscripción de "
+                f"**{active_event['event_name']}** y se retirará el cargo de participante."
+            )
         embed = discord.Embed(
             title="Confirmar Eliminación de Registro",
             description=(
@@ -1681,10 +1694,11 @@ class RegistroEventos:
                 f"Nickname: **{profile['nickname']}**\n"
                 f"ID Espacial: **{profile['external_id']}**\n"
                 f"Pais: **{profile['country']}**"
+                f"{active_warning}"
             ),
             color=discord.Color.red(),
         )
-        await interaction.response.edit_message(
+        await interaction.edit_original_response(
             embed=embed,
             view=DeleteEventUserConfirmationView(
                 self,
@@ -1706,20 +1720,48 @@ class RegistroEventos:
             or not await self.require_database(interaction)
         ):
             return
-        status, profile = await database.delete_event_user_profile(
-            interaction.guild.id,
-            user_id,
-        )
-        messages = {
-            "deleted": f"Registro de **{display_name}** eliminado de la DB.",
-            "active_registration": (
-                "No se puede eliminar este registro mientras el usuario esté inscrito "
-                "en el evento activo."
-            ),
-            "missing": "El registro ya no existe.",
-        }
-        await interaction.response.edit_message(
-            content=messages.get(status, "No se pudo eliminar el registro."),
+        await interaction.response.defer()
+        try:
+            status, result = await database.delete_event_user_profile(
+                interaction.guild.id,
+                user_id,
+            )
+        except Exception:
+            logger.exception("No se pudo eliminar el registro de evento de %s", user_id)
+            await interaction.edit_original_response(
+                content="No se pudo eliminar el registro de la DB.",
+                embed=None,
+                view=None,
+            )
+            return
+
+        if status == "deleted":
+            affected_events = result["affected_events"]
+            message = f"Registro de **{display_name}** eliminado de la DB."
+            role_warning = ""
+            if affected_events:
+                message += " Su inscripción fue retirada de la lista del evento activo."
+                role = interaction.guild.get_role(EVENT_PARTICIPANT_ROLE_ID)
+                member = interaction.guild.get_member(user_id)
+                if member is None:
+                    try:
+                        member = await interaction.guild.fetch_member(user_id)
+                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                        member = None
+                if role is None:
+                    role_warning = " No se encontró el rol de participante para retirarlo."
+                elif member is not None and role in member.roles:
+                    removed = await self.remove_role_safely(member, role)
+                    if not removed:
+                        role_warning = " No se pudo retirar el rol de participante."
+            message += role_warning
+        elif status == "missing":
+            message = "El registro ya no existe."
+        else:
+            message = "No se pudo eliminar el registro."
+
+        await interaction.edit_original_response(
+            content=message,
             embed=None,
             view=None,
         )
