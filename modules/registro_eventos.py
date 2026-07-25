@@ -497,6 +497,10 @@ class AdminMenuView(AdminOwnerView):
     async def delete_record(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.manager.open_delete_records(interaction, self.owner_id)
 
+    @discord.ui.button(label="Blacklist", style=discord.ButtonStyle.danger, row=1)
+    async def blacklist(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(EventBlacklistModal(self.manager))
+
 
 class AddEventModal(discord.ui.Modal, title="Agregar Evento"):
     event_name = discord.ui.TextInput(
@@ -512,6 +516,23 @@ class AddEventModal(discord.ui.Modal, title="Agregar Evento"):
 
     async def on_submit(self, interaction: discord.Interaction):
         await self.manager.add_catalog_event(interaction, self.event_name.value)
+
+
+class EventBlacklistModal(discord.ui.Modal, title="Blacklist de Eventos"):
+    spatial_id = discord.ui.TextInput(
+        label="ID Espacial",
+        placeholder="Entre 7 y 10 numeros",
+        min_length=7,
+        max_length=10,
+        required=True,
+    )
+
+    def __init__(self, manager: "RegistroEventos"):
+        super().__init__()
+        self.manager = manager
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.manager.add_blacklist_id(interaction, self.spatial_id.value)
 
 
 class RemoveEventSelect(discord.ui.Select):
@@ -936,6 +957,13 @@ class RegistroEventos:
             return
 
         profile = await database.get_event_user(interaction.guild.id, interaction.user.id)
+        if profile and await database.is_event_blacklisted(
+            interaction.guild.id,
+            profile["external_id"],
+        ):
+            await send_ephemeral(interaction, "NO PUEDES PARTICIPAR EN ESTE EVENTO!")
+            return
+
         count = await database.get_event_participant_count(event["id"])
         overflow = event["participant_limit"] > 0 and count >= event["participant_limit"]
 
@@ -1040,6 +1068,23 @@ class RegistroEventos:
             return
 
         existing_profile = await database.get_event_user(guild.id, member.id)
+        effective_external_id = (
+            existing_profile["external_id"]
+            if existing_profile
+            else profile["external_id"]
+        )
+        if await database.is_event_blacklisted(guild.id, effective_external_id):
+            await interaction.followup.send(
+                "NO PUEDES PARTICIPAR EN ESTE EVENTO!",
+                ephemeral=True,
+            )
+            if delete_source_on_success:
+                try:
+                    await interaction.delete_original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
+            return
+
         if existing_profile:
             nickname = external_id = country = None
         else:
@@ -1103,6 +1148,7 @@ class RegistroEventos:
         if not had_role:
             await self.remove_role_safely(member, participant_role)
         messages = {
+            "blacklisted": "NO PUEDES PARTICIPAR EN ESTE EVENTO!",
             "external_id_duplicate": "Esa ID Espacial ya pertenece a otro usuario.",
             "closed": "Las inscripciones de este evento estan cerradas.",
             "no_event": "El evento ya no esta activo.",
@@ -1426,6 +1472,38 @@ class RegistroEventos:
             "full": f"El catálogo alcanzó su limite de {EVENT_CATALOG_MAX_ITEMS} eventos.",
         }
         await send_ephemeral(interaction, messages.get(status, "No se pudo agregar el evento."))
+
+    async def add_blacklist_id(
+        self,
+        interaction: discord.Interaction,
+        raw_spatial_id: str,
+    ):
+        if (
+            not interaction.guild
+            or not await self.require_event_admin(interaction)
+            or not await self.require_database(interaction)
+        ):
+            return
+
+        spatial_id = raw_spatial_id.strip()
+        if not SPATIAL_ID_PATTERN.fullmatch(spatial_id):
+            await send_ephemeral(
+                interaction,
+                "La ID Espacial debe contener entre 7 y 10 numeros.",
+            )
+            return
+
+        status, row = await database.add_event_blacklist(
+            interaction.guild.id,
+            spatial_id,
+            interaction.user.id,
+        )
+        message = (
+            f"ID Espacial **{row['external_id']}** agregada a la blacklist."
+            if status == "created"
+            else f"La ID Espacial **{row['external_id']}** ya estaba en la blacklist."
+        )
+        await send_ephemeral(interaction, message)
 
     async def open_edit_records(self, interaction: discord.Interaction, owner_id: int):
         await self.show_edit_records_page(interaction, owner_id, 0)
