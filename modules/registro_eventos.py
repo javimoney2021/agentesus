@@ -14,6 +14,7 @@ from core.config import (
     EVENT_PARTICIPANT_LIMITS,
     EVENT_PARTICIPANT_ROLE_ID,
     EVENT_PT_ROLE_ID,
+    EVENT_REJECTION_ALERT_CHANNEL_ID,
     EVENT_VERIFICATION_CHANNEL_ID,
     EVENT_VERIFIED_ROLE_ID,
     require_staff,
@@ -922,6 +923,42 @@ class RegistroEventos:
         )
         return False
 
+    async def send_registration_rejection_alert(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        external_id: str | None,
+        reason: str,
+    ):
+        spatial_id = external_id or "No registrada"
+        if reason == "eventos_pt":
+            restriction = "con el rol **Eventos PT**"
+        else:
+            restriction = "en lista negra"
+        content = (
+            f"El {member.mention} con ID Espacial **{spatial_id}** {restriction} "
+            "intentó inscribirse a un evento. "
+            "¡Su inscripción fue rechazada con éxito!"
+        )
+        try:
+            channel = (
+                self.bot.get_channel(EVENT_REJECTION_ALERT_CHANNEL_ID)
+                or await self.bot.fetch_channel(EVENT_REJECTION_ALERT_CHANNEL_ID)
+            )
+            await channel.send(
+                content,
+                allowed_mentions=discord.AllowedMentions(
+                    users=True,
+                    roles=False,
+                    everyone=False,
+                ),
+            )
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            logger.exception(
+                "No se pudo enviar el aviso de inscripción rechazada para %s",
+                member.id,
+            )
+
     async def open_registration(self, interaction: discord.Interaction):
         if not interaction.guild or interaction.channel_id not in EVENT_ALLOWED_CHANNEL_IDS:
             channels = " ".join(f"<#{channel_id}>" for channel_id in EVENT_ALLOWED_CHANNEL_IDS)
@@ -1051,6 +1088,16 @@ class RegistroEventos:
                 interaction,
                 "Seu registro não pode ser realizado. Região incorreta.",
             )
+            profile = await database.get_event_user(
+                interaction.guild.id,
+                interaction.user.id,
+            )
+            await self.send_registration_rejection_alert(
+                interaction.guild,
+                interaction.user,
+                profile["external_id"] if profile else None,
+                "eventos_pt",
+            )
             return
 
         verified_role = interaction.guild.get_role(EVENT_VERIFIED_ROLE_ID)
@@ -1081,12 +1128,23 @@ class RegistroEventos:
             return
 
         profile = await database.get_event_user(interaction.guild.id, interaction.user.id)
-        if await database.is_event_blacklisted(
+        blacklist_entry = await database.get_event_blacklist_match(
             interaction.guild.id,
             profile["external_id"] if profile else None,
             interaction.user.id,
-        ):
+        )
+        if blacklist_entry:
             await send_ephemeral(interaction, "NO PUEDES PARTICIPAR EN ESTE EVENTO!")
+            await self.send_registration_rejection_alert(
+                interaction.guild,
+                interaction.user,
+                (
+                    profile["external_id"]
+                    if profile
+                    else blacklist_entry["external_id"]
+                ),
+                "blacklist",
+            )
             return
 
         count = await database.get_event_participant_count(event["id"])
@@ -1178,6 +1236,12 @@ class RegistroEventos:
                 "Seu registro não pode ser realizado. Região incorreta.",
                 ephemeral=True,
             )
+            await self.send_registration_rejection_alert(
+                guild,
+                member,
+                profile["external_id"] if profile else None,
+                "eventos_pt",
+            )
             return
 
         if verified_role is None or verified_role not in member.roles:
@@ -1205,14 +1269,21 @@ class RegistroEventos:
             if existing_profile
             else profile["external_id"]
         )
-        if await database.is_event_blacklisted(
+        blacklist_entry = await database.get_event_blacklist_match(
             guild.id,
             effective_external_id,
             member.id,
-        ):
+        )
+        if blacklist_entry:
             await interaction.followup.send(
                 "NO PUEDES PARTICIPAR EN ESTE EVENTO!",
                 ephemeral=True,
+            )
+            await self.send_registration_rejection_alert(
+                guild,
+                member,
+                effective_external_id or blacklist_entry["external_id"],
+                "blacklist",
             )
             if delete_source_on_success:
                 try:
@@ -1283,6 +1354,13 @@ class RegistroEventos:
 
         if not had_role:
             await self.remove_role_safely(member, participant_role)
+        if status == "blacklisted":
+            await self.send_registration_rejection_alert(
+                guild,
+                member,
+                effective_external_id,
+                "blacklist",
+            )
         messages = {
             "blacklisted": "NO PUEDES PARTICIPAR EN ESTE EVENTO!",
             "external_id_duplicate": "Esa ID Espacial ya pertenece a otro usuario.",

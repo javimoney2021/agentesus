@@ -353,13 +353,21 @@ async def is_event_blacklisted(
     external_id: str | None,
     user_id: int,
 ) -> bool:
+    return await get_event_blacklist_match(guild_id, external_id, user_id) is not None
+
+
+async def get_event_blacklist_match(
+    guild_id: int,
+    external_id: str | None,
+    user_id: int,
+):
     async with bot_pool.acquire() as conn:
-        return await conn.fetchval("""
-            SELECT EXISTS(
-                SELECT 1 FROM event_blacklist
-                WHERE guild_id=$1
-                  AND (external_id=$2 OR user_id=$3)
-            )
+        return await conn.fetchrow("""
+            SELECT * FROM event_blacklist
+            WHERE guild_id=$1
+              AND (external_id=$2 OR user_id=$3)
+            ORDER BY (user_id=$3) DESC
+            LIMIT 1
         """, guild_id, external_id, user_id)
 
 
