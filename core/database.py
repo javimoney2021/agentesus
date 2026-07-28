@@ -55,11 +55,23 @@ async def init_db():
                 );
                 CREATE TABLE IF NOT EXISTS event_blacklist (
                     guild_id BIGINT NOT NULL,
+                    user_id BIGINT,
                     external_id TEXT NOT NULL,
                     created_by BIGINT NOT NULL,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (guild_id, external_id)
                 );
+                ALTER TABLE event_blacklist
+                    ADD COLUMN IF NOT EXISTS user_id BIGINT;
+                UPDATE event_blacklist AS blacklist
+                SET user_id = users.user_id
+                FROM event_users AS users
+                WHERE blacklist.guild_id = users.guild_id
+                  AND blacklist.external_id = users.external_id
+                  AND blacklist.user_id IS NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS event_blacklist_guild_user_uidx
+                    ON event_blacklist (guild_id, user_id)
+                    WHERE user_id IS NOT NULL;
                 CREATE TABLE IF NOT EXISTS event_instances (
                     id SERIAL PRIMARY KEY,
                     guild_id BIGINT NOT NULL,
@@ -284,33 +296,71 @@ async def get_event_users_page(guild_id: int, limit: int, offset: int):
         """, guild_id, limit, offset)
 
 
-async def add_event_blacklist(guild_id: int, external_id: str, created_by: int):
+async def get_event_blacklist(guild_id: int):
+    async with bot_pool.acquire() as conn:
+        return await conn.fetch("""
+            SELECT * FROM event_blacklist
+            WHERE guild_id=$1
+            ORDER BY created_at ASC, external_id ASC
+        """, guild_id)
+
+
+async def add_event_blacklist(
+    guild_id: int,
+    user_id: int,
+    external_id: str,
+    created_by: int,
+    max_items: int,
+):
     async with bot_pool.acquire() as conn:
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", guild_id)
             existing = await conn.fetchrow("""
                 SELECT * FROM event_blacklist
-                WHERE guild_id=$1 AND external_id=$2
-            """, guild_id, external_id)
+                WHERE guild_id=$1 AND (external_id=$2 OR user_id=$3)
+            """, guild_id, external_id, user_id)
             if existing:
                 return "duplicate", existing
 
+            count = await conn.fetchval(
+                "SELECT COUNT(*) FROM event_blacklist WHERE guild_id=$1",
+                guild_id,
+            )
+            if count >= max_items:
+                return "full", None
+
             row = await conn.fetchrow("""
-                INSERT INTO event_blacklist (guild_id, external_id, created_by)
-                VALUES ($1, $2, $3)
+                INSERT INTO event_blacklist (guild_id, user_id, external_id, created_by)
+                VALUES ($1, $2, $3, $4)
                 RETURNING *
-            """, guild_id, external_id, created_by)
+            """, guild_id, user_id, external_id, created_by)
             return "created", row
 
 
-async def is_event_blacklisted(guild_id: int, external_id: str) -> bool:
+async def remove_event_blacklist(guild_id: int, external_id: str):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", guild_id)
+            return await conn.fetchrow("""
+                DELETE FROM event_blacklist
+                WHERE guild_id=$1 AND external_id=$2
+                RETURNING *
+            """, guild_id, external_id)
+
+
+async def is_event_blacklisted(
+    guild_id: int,
+    external_id: str | None,
+    user_id: int,
+) -> bool:
     async with bot_pool.acquire() as conn:
         return await conn.fetchval("""
             SELECT EXISTS(
                 SELECT 1 FROM event_blacklist
-                WHERE guild_id=$1 AND external_id=$2
+                WHERE guild_id=$1
+                  AND (external_id=$2 OR user_id=$3)
             )
-        """, guild_id, external_id)
+        """, guild_id, external_id, user_id)
 
 
 async def update_event_user_profile(
@@ -472,9 +522,10 @@ async def register_event_participant(
             blacklisted = await conn.fetchval("""
                 SELECT EXISTS(
                     SELECT 1 FROM event_blacklist
-                    WHERE guild_id=$1 AND external_id=$2
+                    WHERE guild_id=$1
+                      AND (external_id=$2 OR user_id=$3)
                 )
-            """, guild_id, effective_external_id)
+            """, guild_id, effective_external_id, user_id)
             if blacklisted:
                 return "blacklisted", None
 
