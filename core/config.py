@@ -39,9 +39,34 @@ R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
 R2_BUCKET = os.getenv("R2_BUCKET")
 R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")
 
+
 def env_int(name: str, default: int = 0) -> int:
     value = os.getenv(name, str(default))
     return int(value) if value.isdigit() else default
+
+
+# Sistema independiente de verificacion web.
+VERIFIED_ROLE_ID = env_int("VERIFIED_ROLE_ID")
+STAFF_CHANNEL_ID = env_int("STAFF_CHANNEL_ID")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+TOKEN_EXPIRATION_MINUTES = max(1, env_int("TOKEN_EXPIRATION_MINUTES", 10))
+DATA_RETENTION_DAYS = max(1, env_int("DATA_RETENTION_DAYS", 90))
+TOKEN_SECRET = os.getenv("TOKEN_SECRET", "").strip()
+IP_HASH_SECRET = os.getenv("IP_HASH_SECRET", "").strip()
+
+VERIFICATION_REQUIRED_SETTINGS = {
+    "VERIFIED_ROLE_ID": VERIFIED_ROLE_ID,
+    "STAFF_CHANNEL_ID": STAFF_CHANNEL_ID,
+    "FRONTEND_URL": FRONTEND_URL,
+    "TOKEN_SECRET": TOKEN_SECRET,
+    "IP_HASH_SECRET": IP_HASH_SECRET,
+}
+
+
+def get_missing_verification_settings() -> tuple[str, ...]:
+    return tuple(
+        name for name, value in VERIFICATION_REQUIRED_SETTINGS.items() if not value
+    )
 
 
 # Registro y gestion de eventos.

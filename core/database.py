@@ -100,6 +100,60 @@ async def init_db():
                     FOREIGN KEY (guild_id, user_id)
                         REFERENCES event_users(guild_id, user_id) ON DELETE RESTRICT
                 );
+                CREATE TABLE IF NOT EXISTS verification_tokens (
+                    token_id UUID PRIMARY KEY,
+                    token_digest CHAR(64) NOT NULL UNIQUE,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'issued'
+                        CHECK (status IN ('issued', 'used', 'expired', 'revoked')),
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    used_at TIMESTAMP WITH TIME ZONE,
+                    CHECK (expires_at > created_at)
+                );
+                CREATE INDEX IF NOT EXISTS verification_tokens_user_status_idx
+                    ON verification_tokens (guild_id, user_id, status);
+                CREATE INDEX IF NOT EXISTS verification_tokens_expiration_idx
+                    ON verification_tokens (expires_at)
+                    WHERE status = 'issued';
+                CREATE TABLE IF NOT EXISTS verification_attempts (
+                    id BIGSERIAL PRIMARY KEY,
+                    token_id UUID UNIQUE
+                        REFERENCES verification_tokens(token_id) ON DELETE SET NULL,
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    discord_tag TEXT,
+                    ip_hash CHAR(64) NOT NULL,
+                    fingerprint_hash CHAR(64),
+                    country_code VARCHAR(2),
+                    region TEXT,
+                    timezone TEXT,
+                    language TEXT,
+                    browser_family TEXT,
+                    os_family TEXT,
+                    device_type TEXT,
+                    vpn_detected BOOLEAN,
+                    proxy_detected BOOLEAN,
+                    hosting_detected BOOLEAN,
+                    risk_score SMALLINT NOT NULL DEFAULT 0
+                        CHECK (risk_score BETWEEN 0 AND 100),
+                    risk_level TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (risk_level IN ('pending', 'low', 'medium', 'high')),
+                    decision TEXT NOT NULL DEFAULT 'pending'
+                        CHECK (decision IN ('pending', 'approved', 'review', 'rejected', 'error')),
+                    role_granted BOOLEAN NOT NULL DEFAULT FALSE,
+                    signals JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    retention_until TIMESTAMP WITH TIME ZONE NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS verification_attempts_user_idx
+                    ON verification_attempts (guild_id, user_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS verification_attempts_ip_idx
+                    ON verification_attempts (guild_id, ip_hash, created_at DESC);
+                CREATE INDEX IF NOT EXISTS verification_attempts_retention_idx
+                    ON verification_attempts (retention_until);
             """)
         print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
         async with bot_pool.acquire() as conn:

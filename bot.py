@@ -3,7 +3,7 @@ import asyncio
 import discord
 from discord.ext import commands, tasks
 
-from core.config import GUILD_ID, TOKEN, intents
+from core.config import GUILD_ID, TOKEN, get_missing_verification_settings, intents
 from core.database import init_db
 from modules import posts, registro_eventos, registros
 
@@ -12,6 +12,15 @@ class MyBot(commands.Bot):
     async def setup_hook(self):
         await init_db()
         await posts.load_cache()
+
+        missing_verification_settings = get_missing_verification_settings()
+        if missing_verification_settings:
+            print(
+                "⚠️ Verificacion SA pendiente de configurar: "
+                + ", ".join(missing_verification_settings)
+            )
+        else:
+            print("✅ Configuracion base de Verificacion SA cargada.")
 
         registros.setup(self)
         posts.setup(self)
