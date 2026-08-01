@@ -1,14 +1,21 @@
 import asyncio
+import logging
 
 import discord
 from discord.ext import commands, tasks
 
+from api.verification_api import VerificationAPIServer
 from core.config import GUILD_ID, TOKEN, get_missing_verification_settings, intents
 from core.database import init_db
 from modules import posts, registro_eventos, registros
 
 
+logger = logging.getLogger(__name__)
+
+
 class MyBot(commands.Bot):
+    verification_api = None
+
     async def setup_hook(self):
         await init_db()
         await posts.load_cache()
@@ -21,6 +28,14 @@ class MyBot(commands.Bot):
             )
         else:
             print("✅ Configuracion base de Verificacion SA cargada.")
+            self.verification_api = VerificationAPIServer()
+            try:
+                await self.verification_api.start()
+            except Exception:
+                logger.exception(
+                    "No se pudo iniciar la API de Verificacion SA; "
+                    "el bot continuara conectado."
+                )
 
         registros.setup(self)
         posts.setup(self)
@@ -42,6 +57,11 @@ class MyBot(commands.Bot):
             cmds = [c.name for c in self.tree.get_commands()]
             print("🧾 Comandos cargados en el árbol:", cmds)
             print("👉 Si esta lista sale vacía, tus comandos no están registrándose antes del sync.")
+
+    async def close(self):
+        if self.verification_api is not None:
+            await self.verification_api.stop()
+        await super().close()
 
     @tasks.loop(minutes=1)
     async def check_scheduled_posts_task(self):

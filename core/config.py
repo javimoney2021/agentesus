@@ -53,6 +53,9 @@ TOKEN_EXPIRATION_MINUTES = max(1, env_int("TOKEN_EXPIRATION_MINUTES", 10))
 DATA_RETENTION_DAYS = max(1, env_int("DATA_RETENTION_DAYS", 90))
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "").strip()
 IP_HASH_SECRET = os.getenv("IP_HASH_SECRET", "").strip()
+API_HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
+api_port = env_int("PORT", 80)
+API_PORT = api_port if 1 <= api_port <= 65535 else 80
 
 VERIFICATION_REQUIRED_SETTINGS = {
     "VERIFIED_ROLE_ID": VERIFIED_ROLE_ID,
