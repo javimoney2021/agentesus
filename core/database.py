@@ -117,6 +117,9 @@ async def init_db():
                 CREATE INDEX IF NOT EXISTS verification_tokens_expiration_idx
                     ON verification_tokens (expires_at)
                     WHERE status = 'issued';
+                CREATE UNIQUE INDEX IF NOT EXISTS verification_tokens_one_issued_user_uidx
+                    ON verification_tokens (guild_id, user_id)
+                    WHERE status = 'issued';
                 CREATE TABLE IF NOT EXISTS verification_attempts (
                     id BIGSERIAL PRIMARY KEY,
                     token_id UUID UNIQUE
@@ -167,6 +170,97 @@ async def init_db():
 async def get_registro(user_id):
     async with bot_pool.acquire() as conn:
         return await conn.fetchrow("SELECT * FROM registros WHERE user_id=$1", user_id)
+
+
+async def create_verification_token(
+    token_id,
+    token_digest,
+    guild_id,
+    user_id,
+    expires_at,
+):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1::BIGINT)",
+                user_id,
+            )
+            await conn.execute(
+                """
+                UPDATE verification_tokens
+                SET status = CASE
+                    WHEN expires_at <= CURRENT_TIMESTAMP THEN 'expired'
+                    ELSE 'revoked'
+                END
+                WHERE guild_id=$1 AND user_id=$2 AND status='issued'
+                """,
+                guild_id,
+                user_id,
+            )
+            return await conn.fetchrow(
+                """
+                INSERT INTO verification_tokens (
+                    token_id,
+                    token_digest,
+                    guild_id,
+                    user_id,
+                    expires_at
+                )
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING *
+                """,
+                token_id,
+                token_digest,
+                guild_id,
+                user_id,
+                expires_at,
+            )
+
+
+async def consume_verification_token(token_id, token_digest):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE verification_tokens
+                SET status='expired'
+                WHERE token_id=$1
+                  AND token_digest=$2
+                  AND status='issued'
+                  AND expires_at <= CURRENT_TIMESTAMP
+                """,
+                token_id,
+                token_digest,
+            )
+            return await conn.fetchrow(
+                """
+                UPDATE verification_tokens
+                SET status='used', used_at=CURRENT_TIMESTAMP
+                WHERE token_id=$1
+                  AND token_digest=$2
+                  AND status='issued'
+                  AND expires_at > CURRENT_TIMESTAMP
+                RETURNING *
+                """,
+                token_id,
+                token_digest,
+            )
+
+
+async def revoke_verification_token(token_id, token_digest):
+    async with bot_pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            UPDATE verification_tokens
+            SET status='revoked'
+            WHERE token_id=$1
+              AND token_digest=$2
+              AND status='issued'
+            RETURNING *
+            """,
+            token_id,
+            token_digest,
+        )
 
 
 async def get_all_registros():
