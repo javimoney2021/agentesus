@@ -45,34 +45,6 @@ def env_int(name: str, default: int = 0) -> int:
     return int(value) if value.isdigit() else default
 
 
-# Sistema independiente de verificacion web.
-VERIFIED_ROLE_ID = env_int("VERIFIED_ROLE_ID")
-STAFF_CHANNEL_ID = env_int("STAFF_CHANNEL_ID")
-FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
-TOKEN_EXPIRATION_MINUTES = max(1, env_int("TOKEN_EXPIRATION_MINUTES", 10))
-DATA_RETENTION_DAYS = max(1, env_int("DATA_RETENTION_DAYS", 90))
-ANTIFRAUD_RETENTION_DAYS = 400
-TOKEN_SECRET = os.getenv("TOKEN_SECRET", "").strip()
-IP_HASH_SECRET = os.getenv("IP_HASH_SECRET", "").strip()
-API_HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"
-api_port = env_int("PORT", 80)
-API_PORT = api_port if 1 <= api_port <= 65535 else 80
-
-VERIFICATION_REQUIRED_SETTINGS = {
-    "VERIFIED_ROLE_ID": VERIFIED_ROLE_ID,
-    "STAFF_CHANNEL_ID": STAFF_CHANNEL_ID,
-    "FRONTEND_URL": FRONTEND_URL,
-    "TOKEN_SECRET": TOKEN_SECRET,
-    "IP_HASH_SECRET": IP_HASH_SECRET,
-}
-
-
-def get_missing_verification_settings() -> tuple[str, ...]:
-    return tuple(
-        name for name, value in VERIFICATION_REQUIRED_SETTINGS.items() if not value
-    )
-
-
 # Registro y gestion de eventos.
 EVENT_VERIFIED_ROLE_ID = 1409401827065204786
 EVENT_PARTICIPANT_ROLE_ID = 1507215915396239410
