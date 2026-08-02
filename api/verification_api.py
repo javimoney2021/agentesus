@@ -243,11 +243,46 @@ async def _staff_channel(bot):
         return None
 
 
+async def _send_private_result(
+    bot,
+    token_id,
+    user_id: int,
+    approved: bool,
+) -> None:
+    manager = getattr(bot, "verification_manager", None)
+    if manager is None:
+        logger.warning(
+            "No hay gestor disponible para notificar la verificacion de %s.",
+            user_id,
+        )
+        return
+
+    try:
+        delivered = await manager.send_verification_result(
+            token_id,
+            user_id,
+            approved,
+        )
+    except Exception:
+        logger.exception(
+            "No se pudo enviar el resultado privado de verificacion a %s.",
+            user_id,
+        )
+        return
+
+    if not delivered:
+        logger.info(
+            "La interaccion privada de verificacion ya no estaba activa para %s.",
+            user_id,
+        )
+
+
 async def _send_review_alert(
     bot,
     member: discord.Member,
     assessment: RiskAssessment,
     attempt_id: int,
+    country_code: str | None,
 ) -> None:
     channel = await _staff_channel(bot)
     if channel is None:
@@ -296,6 +331,21 @@ async def _send_review_alert(
     embed.add_field(
         name="Verificacion interna",
         value=f"`{attempt_id}`",
+        inline=True,
+    )
+    country_value = "No disponible"
+    if country_code:
+        country_code = country_code.upper()
+        if len(country_code) == 2 and country_code.isalpha():
+            flag = "".join(
+                chr(127397 + ord(character)) for character in country_code
+            )
+            country_value = f"{flag} `{country_code}`"
+        else:
+            country_value = f"`{country_code}`"
+    embed.add_field(
+        name="Pais detectado",
+        value=country_value,
         inline=True,
     )
     embed.set_footer(
@@ -440,6 +490,12 @@ def create_verification_app(bot) -> web.Application:
                 verification_token.token_id,
                 supplied_digest,
             )
+            await _send_private_result(
+                bot,
+                verification_token.token_id,
+                verification_token.user_id,
+                approved=True,
+            )
             return web.json_response({"status": "completed"})
 
         try:
@@ -558,12 +614,19 @@ def create_verification_app(bot) -> web.Application:
                 )
                 return _error_response("temporarily_unavailable", 503)
 
+            await _send_private_result(
+                bot,
+                verification_token.token_id,
+                verification_token.user_id,
+                approved=False,
+            )
             try:
                 await _send_review_alert(
                     bot,
                     member,
                     assessment,
                     attempt["id"],
+                    attempt["country_code"],
                 )
             except Exception:
                 logger.exception(
@@ -601,6 +664,12 @@ def create_verification_app(bot) -> web.Application:
                     "No se pudo registrar o alertar el error de rol de %s.",
                     attempt["id"],
                 )
+            await _send_private_result(
+                bot,
+                verification_token.token_id,
+                verification_token.user_id,
+                approved=False,
+            )
             return web.json_response({"status": "accepted"}, status=202)
 
         try:
@@ -630,6 +699,12 @@ def create_verification_app(bot) -> web.Application:
                     )
             return _error_response("temporarily_unavailable", 503)
 
+        await _send_private_result(
+            bot,
+            verification_token.token_id,
+            verification_token.user_id,
+            approved=True,
+        )
         try:
             await _send_success_alert(bot, member)
         except Exception:

@@ -18,6 +18,8 @@ from core.verification_security import create_signed_verification_token
 
 logger = logging.getLogger(__name__)
 ISSUE_COOLDOWN_SECONDS = 15
+RESULT_INTERACTION_LIFETIME_SECONDS = TOKEN_EXPIRATION_MINUTES * 60
+VERIFICATION_TICKET_CHANNEL_ID = 1399742637426081913
 
 
 class PersonalVerificationLinkView(discord.ui.View):
@@ -159,12 +161,70 @@ class VerificationManager:
         self.bot = bot
         self._issue_locks = {}
         self._last_issued_at = {}
+        self._pending_result_interactions = {}
+
+    def _purge_expired_result_interactions(self, now: float) -> None:
+        expired_tokens = [
+            token_id
+            for token_id, (_user_id, _interaction, expires_at) in (
+                self._pending_result_interactions.items()
+            )
+            if expires_at <= now
+        ]
+        for token_id in expired_tokens:
+            self._pending_result_interactions.pop(token_id, None)
+
+    def remember_result_interaction(
+        self,
+        token_id,
+        user_id: int,
+        interaction: discord.Interaction,
+    ) -> None:
+        now = asyncio.get_running_loop().time()
+        self._purge_expired_result_interactions(now)
+        self._pending_result_interactions[token_id] = (
+            user_id,
+            interaction,
+            now + RESULT_INTERACTION_LIFETIME_SECONDS,
+        )
+
+    async def send_verification_result(
+        self,
+        token_id,
+        user_id: int,
+        approved: bool,
+    ) -> bool:
+        now = asyncio.get_running_loop().time()
+        self._purge_expired_result_interactions(now)
+        pending = self._pending_result_interactions.get(token_id)
+        if pending is None or pending[0] != user_id:
+            return False
+
+        self._pending_result_interactions.pop(token_id, None)
+        if approved:
+            content = "Tu cuenta ha sido Verificada con Éxito ✔️"
+        else:
+            content = (
+                "❌ Tu cuenta no ha podido ser verificada. Si crees que se trata "
+                "de un error, abre un ticket en "
+                f"<#{VERIFICATION_TICKET_CHANNEL_ID}> y selecciona la **Opción 1**."
+            )
+
+        await pending[1].followup.send(content, ephemeral=True)
+        return True
 
     def clear_user_runtime_state(self, user_id: int) -> None:
         self._last_issued_at.pop(user_id, None)
         lock = self._issue_locks.get(user_id)
         if lock is None or not lock.locked():
             self._issue_locks.pop(user_id, None)
+        user_tokens = [
+            token_id
+            for token_id, pending in self._pending_result_interactions.items()
+            if pending[0] == user_id
+        ]
+        for token_id in user_tokens:
+            self._pending_result_interactions.pop(token_id, None)
 
     @staticmethod
     def panel_embed() -> discord.Embed:
@@ -272,10 +332,16 @@ class VerificationManager:
                 view=PersonalVerificationLinkView(issued.verification_url),
                 ephemeral=True,
             )
+            self.remember_result_interaction(
+                issued.payload.token_id,
+                user_id,
+                interaction,
+            )
 
 
 def setup(bot):
     verification = VerificationManager(bot)
+    bot.verification_manager = verification
     bot.add_view(VerificationPanelView(verification))
 
     @bot.tree.command(
