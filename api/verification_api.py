@@ -521,6 +521,18 @@ def create_verification_app(bot) -> web.Application:
                 candidates,
                 now=current_time,
             )
+            logger.info(
+                (
+                    "Verificacion evaluada | usuario=%s | intento=%s | "
+                    "decision=%s | riesgo=%s/100 | relacionadas=%s | motivos=%s"
+                ),
+                verification_token.user_id,
+                attempt["id"],
+                assessment.decision,
+                assessment.score,
+                assessment.related_user_count,
+                ", ".join(assessment.reasons) or "sin coincidencias",
+            )
         except Exception:
             logger.exception(
                 "No se pudo evaluar el riesgo de la verificacion %s.",

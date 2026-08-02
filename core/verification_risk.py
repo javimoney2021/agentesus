@@ -7,6 +7,7 @@ REVIEW_THRESHOLD = 65
 HIGH_RISK_THRESHOLD = 85
 RECENT_WINDOW = timedelta(hours=24)
 RELATED_WINDOW = timedelta(days=7)
+EXACT_IP_REVIEW_WINDOW = timedelta(days=30)
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,12 @@ def assess_verification_risk(
         elif age <= RELATED_WINDOW:
             score += 8
             reasons.append("Coincidencia registrada en los ultimos 7 dias")
+
+        if exact_ip and age <= EXACT_IP_REVIEW_WINDOW:
+            score = max(score, REVIEW_THRESHOLD)
+            reasons.append(
+                "IP exacta reutilizada por otra cuenta en los ultimos 30 dias"
+            )
 
         if exact_ip and len(exact_ip_users) >= 2:
             score += 20
