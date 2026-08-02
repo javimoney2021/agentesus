@@ -1,3 +1,5 @@
+import json
+
 import asyncpg
 
 from core.config import DATABASE_URL
@@ -146,11 +148,15 @@ async def init_db():
                     decision TEXT NOT NULL DEFAULT 'pending'
                         CHECK (decision IN ('pending', 'approved', 'review', 'rejected', 'error')),
                     role_granted BOOLEAN NOT NULL DEFAULT FALSE,
+                    consent_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     signals JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     retention_until TIMESTAMP WITH TIME ZONE NOT NULL
                 );
+                ALTER TABLE verification_attempts
+                    ADD COLUMN IF NOT EXISTS consent_at TIMESTAMP WITH TIME ZONE
+                    NOT NULL DEFAULT CURRENT_TIMESTAMP;
                 CREATE INDEX IF NOT EXISTS verification_attempts_user_idx
                     ON verification_attempts (guild_id, user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS verification_attempts_ip_idx
@@ -261,6 +267,137 @@ async def revoke_verification_token(token_id, token_digest):
             token_id,
             token_digest,
         )
+
+
+async def get_verification_submission_counts(
+    guild_id,
+    user_id,
+    ip_hash,
+    since,
+):
+    async with bot_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT
+                (
+                    SELECT COUNT(*)
+                    FROM verification_attempts
+                    WHERE guild_id=$1 AND user_id=$2 AND created_at >= $4
+                ) AS user_count,
+                (
+                    SELECT COUNT(*)
+                    FROM verification_attempts
+                    WHERE guild_id=$1 AND ip_hash=$3 AND created_at >= $4
+                ) AS ip_count
+            """,
+            guild_id,
+            user_id,
+            ip_hash,
+            since,
+        )
+        return int(row["user_count"]), int(row["ip_count"])
+
+
+async def record_pending_verification_attempt(
+    *,
+    token_id,
+    token_digest,
+    guild_id,
+    user_id,
+    discord_tag,
+    ip_hash,
+    fingerprint_hash,
+    country_code,
+    region,
+    timezone_name,
+    language,
+    browser_family,
+    os_family,
+    device_type,
+    signals,
+    retention_until,
+):
+    signals_json = json.dumps(
+        signals,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                UPDATE verification_tokens
+                SET status='expired'
+                WHERE token_id=$1
+                  AND token_digest=$2
+                  AND status='issued'
+                  AND expires_at <= CURRENT_TIMESTAMP
+                """,
+                token_id,
+                token_digest,
+            )
+            consumed_token = await conn.fetchrow(
+                """
+                UPDATE verification_tokens
+                SET status='used', used_at=CURRENT_TIMESTAMP
+                WHERE token_id=$1
+                  AND token_digest=$2
+                  AND guild_id=$3
+                  AND user_id=$4
+                  AND status='issued'
+                  AND expires_at > CURRENT_TIMESTAMP
+                RETURNING token_id
+                """,
+                token_id,
+                token_digest,
+                guild_id,
+                user_id,
+            )
+            if consumed_token is None:
+                return None
+
+            return await conn.fetchrow(
+                """
+                INSERT INTO verification_attempts (
+                    token_id,
+                    guild_id,
+                    user_id,
+                    discord_tag,
+                    ip_hash,
+                    fingerprint_hash,
+                    country_code,
+                    region,
+                    timezone,
+                    language,
+                    browser_family,
+                    os_family,
+                    device_type,
+                    signals,
+                    retention_until
+                )
+                VALUES (
+                    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14::jsonb, $15
+                )
+                RETURNING *
+                """,
+                token_id,
+                guild_id,
+                user_id,
+                discord_tag,
+                ip_hash,
+                fingerprint_hash,
+                country_code,
+                region,
+                timezone_name,
+                language,
+                browser_family,
+                os_family,
+                device_type,
+                signals_json,
+                retention_until,
+            )
 
 
 async def get_all_registros():

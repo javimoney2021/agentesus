@@ -1,17 +1,25 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote
 from uuid import UUID, uuid4
 
-from core.config import FRONTEND_URL, TOKEN_EXPIRATION_MINUTES, TOKEN_SECRET
+from core.config import (
+    FRONTEND_URL,
+    IP_HASH_SECRET,
+    TOKEN_EXPIRATION_MINUTES,
+    TOKEN_SECRET,
+)
 
 
 TOKEN_VERSION = 1
 TOKEN_SECRET_MIN_LENGTH = 32
+PRIVACY_SECRET_MIN_LENGTH = 32
 TOKEN_MAX_LENGTH = 2048
 CLOCK_SKEW_SECONDS = 30
 
@@ -57,6 +65,23 @@ def _token_secret_bytes() -> bytes:
     return TOKEN_SECRET.encode("utf-8")
 
 
+def _privacy_secret_bytes() -> bytes:
+    if len(IP_HASH_SECRET) < PRIVACY_SECRET_MIN_LENGTH:
+        raise VerificationConfigurationError(
+            "IP_HASH_SECRET debe contener al menos 32 caracteres."
+        )
+    return IP_HASH_SECRET.encode("utf-8")
+
+
+def _privacy_digest(namespace: str, value: str) -> str:
+    message = f"{namespace}\0{value}".encode("utf-8")
+    return hmac.new(
+        _privacy_secret_bytes(),
+        message,
+        hashlib.sha256,
+    ).hexdigest()
+
+
 def _urlsafe_encode(value: bytes) -> str:
     return base64.urlsafe_b64encode(value).rstrip(b"=").decode("ascii")
 
@@ -91,6 +116,24 @@ def _positive_snowflake(value: object, field_name: str) -> int:
 
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def hash_ip_address(ip_address: str) -> str:
+    try:
+        canonical_ip = ipaddress.ip_address(ip_address).compressed
+    except ValueError as exc:
+        raise ValueError("Direccion IP invalida.") from exc
+    return _privacy_digest("verification-ip:v1", canonical_ip)
+
+
+def hash_limited_fingerprint(signals: Mapping[str, object]) -> str:
+    canonical_signals = json.dumps(
+        dict(signals),
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return _privacy_digest("verification-fingerprint:v1", canonical_signals)
 
 
 def build_verification_url(token: str) -> str:

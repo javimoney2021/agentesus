@@ -28,7 +28,7 @@ class MyBot(commands.Bot):
             )
         else:
             print("✅ Configuracion base de Verificacion SA cargada.")
-            self.verification_api = VerificationAPIServer()
+            self.verification_api = VerificationAPIServer(self)
             try:
                 await self.verification_api.start()
             except Exception:
