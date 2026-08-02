@@ -130,6 +130,7 @@ async def init_db():
                     user_id BIGINT NOT NULL,
                     discord_tag TEXT,
                     ip_hash CHAR(64) NOT NULL,
+                    ip_network_hash CHAR(64),
                     fingerprint_hash CHAR(64),
                     country_code VARCHAR(2),
                     region TEXT,
@@ -148,6 +149,8 @@ async def init_db():
                     decision TEXT NOT NULL DEFAULT 'pending'
                         CHECK (decision IN ('pending', 'approved', 'review', 'rejected', 'error')),
                     role_granted BOOLEAN NOT NULL DEFAULT FALSE,
+                    possible_main_user_id BIGINT,
+                    risk_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
                     consent_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     signals JSONB NOT NULL DEFAULT '{}'::jsonb,
                     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -157,10 +160,21 @@ async def init_db():
                 ALTER TABLE verification_attempts
                     ADD COLUMN IF NOT EXISTS consent_at TIMESTAMP WITH TIME ZONE
                     NOT NULL DEFAULT CURRENT_TIMESTAMP;
+                ALTER TABLE verification_attempts
+                    ADD COLUMN IF NOT EXISTS ip_network_hash CHAR(64);
+                ALTER TABLE verification_attempts
+                    ADD COLUMN IF NOT EXISTS possible_main_user_id BIGINT;
+                ALTER TABLE verification_attempts
+                    ADD COLUMN IF NOT EXISTS risk_reasons JSONB
+                    NOT NULL DEFAULT '[]'::jsonb;
                 CREATE INDEX IF NOT EXISTS verification_attempts_user_idx
                     ON verification_attempts (guild_id, user_id, created_at DESC);
                 CREATE INDEX IF NOT EXISTS verification_attempts_ip_idx
                     ON verification_attempts (guild_id, ip_hash, created_at DESC);
+                CREATE INDEX IF NOT EXISTS verification_attempts_network_idx
+                    ON verification_attempts
+                    (guild_id, ip_network_hash, created_at DESC)
+                    WHERE ip_network_hash IS NOT NULL;
                 CREATE INDEX IF NOT EXISTS verification_attempts_retention_idx
                     ON verification_attempts (retention_until);
             """)
@@ -306,6 +320,7 @@ async def record_pending_verification_attempt(
     user_id,
     discord_tag,
     ip_hash,
+    ip_network_hash,
     fingerprint_hash,
     country_code,
     region,
@@ -365,6 +380,7 @@ async def record_pending_verification_attempt(
                     user_id,
                     discord_tag,
                     ip_hash,
+                    ip_network_hash,
                     fingerprint_hash,
                     country_code,
                     region,
@@ -378,7 +394,7 @@ async def record_pending_verification_attempt(
                 )
                 VALUES (
                     $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                    $11, $12, $13, $14::jsonb, $15
+                    $11, $12, $13, $14, $15::jsonb, $16
                 )
                 RETURNING *
                 """,
@@ -387,6 +403,7 @@ async def record_pending_verification_attempt(
                 user_id,
                 discord_tag,
                 ip_hash,
+                ip_network_hash,
                 fingerprint_hash,
                 country_code,
                 region,
@@ -398,6 +415,94 @@ async def record_pending_verification_attempt(
                 signals_json,
                 retention_until,
             )
+
+
+async def get_verification_match_candidates(
+    guild_id,
+    user_id,
+    ip_hash,
+    ip_network_hash,
+    fingerprint_hash,
+    limit=100,
+):
+    async with bot_pool.acquire() as conn:
+        return await conn.fetch(
+            """
+            SELECT
+                id,
+                user_id,
+                discord_tag,
+                ip_hash,
+                ip_network_hash,
+                fingerprint_hash,
+                country_code,
+                timezone,
+                language,
+                browser_family,
+                os_family,
+                device_type,
+                decision,
+                role_granted,
+                created_at
+            FROM verification_attempts
+            WHERE guild_id=$1
+              AND user_id<>$2
+              AND retention_until > CURRENT_TIMESTAMP
+              AND decision IN ('pending', 'approved', 'review')
+              AND (
+                    ip_hash=$3
+                    OR ip_network_hash=$4
+                    OR fingerprint_hash=$5
+              )
+            ORDER BY created_at ASC
+            LIMIT $6
+            """,
+            guild_id,
+            user_id,
+            ip_hash,
+            ip_network_hash,
+            fingerprint_hash,
+            limit,
+        )
+
+
+async def finalize_verification_attempt(
+    attempt_id,
+    *,
+    risk_score,
+    risk_level,
+    decision,
+    role_granted,
+    possible_main_user_id,
+    risk_reasons,
+):
+    reasons_json = json.dumps(
+        risk_reasons,
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    async with bot_pool.acquire() as conn:
+        return await conn.fetchrow(
+            """
+            UPDATE verification_attempts
+            SET risk_score=$2,
+                risk_level=$3,
+                decision=$4,
+                role_granted=$5,
+                possible_main_user_id=$6,
+                risk_reasons=$7::jsonb,
+                updated_at=CURRENT_TIMESTAMP
+            WHERE id=$1
+            RETURNING *
+            """,
+            attempt_id,
+            risk_score,
+            risk_level,
+            decision,
+            role_granted,
+            possible_main_user_id,
+            reasons_json,
+        )
 
 
 async def get_all_registros():

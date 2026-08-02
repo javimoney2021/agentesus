@@ -15,12 +15,15 @@ from core.config import (
     DATA_RETENTION_DAYS,
     FRONTEND_URL,
     GUILD_ID,
+    STAFF_CHANNEL_ID,
     VERIFIED_ROLE_ID,
 )
+from core.verification_risk import RiskAssessment, assess_verification_risk
 from core.verification_security import (
     InvalidVerificationToken,
     VerificationConfigurationError,
     hash_ip_address,
+    hash_ip_network,
     hash_limited_fingerprint,
     token_digest,
     validate_signed_verification_token,
@@ -50,6 +53,10 @@ COUNTRY_CODE_PATTERN = re.compile(r"^[A-Z0-9]{2}$")
 
 
 class InvalidSubmission(ValueError):
+    pass
+
+
+class RoleGrantError(RuntimeError):
     pass
 
 
@@ -193,6 +200,143 @@ async def _get_member(bot, guild_id: int, user_id: int):
         return None
 
 
+async def _grant_verified_role(member: discord.Member) -> bool:
+    guild = member.guild
+    role = guild.get_role(VERIFIED_ROLE_ID)
+    bot_member = guild.me
+    if role is None or role.managed or role.id == guild.id:
+        raise RoleGrantError("El rol verificado no existe o no es asignable.")
+    if bot_member is None:
+        raise RoleGrantError("No se pudo localizar al bot dentro del servidor.")
+    permissions = bot_member.guild_permissions
+    if not (permissions.administrator or permissions.manage_roles):
+        raise RoleGrantError("El bot no posee el permiso Manage Roles.")
+    if bot_member.top_role <= role:
+        raise RoleGrantError("El rol del bot no esta por encima del rol verificado.")
+    if member.get_role(role.id) is not None:
+        return False
+
+    await member.add_roles(
+        role,
+        reason="Verificacion SA aprobada automaticamente",
+    )
+    return True
+
+
+async def _remove_verified_role(member: discord.Member) -> None:
+    role = member.guild.get_role(VERIFIED_ROLE_ID)
+    if role is None or member.get_role(role.id) is None:
+        return
+    await member.remove_roles(
+        role,
+        reason="Reversion por error al guardar la verificacion SA",
+    )
+
+
+async def _staff_channel(bot):
+    channel = bot.get_channel(STAFF_CHANNEL_ID)
+    if channel is not None:
+        return channel
+    try:
+        return await bot.fetch_channel(STAFF_CHANNEL_ID)
+    except discord.HTTPException:
+        return None
+
+
+async def _send_review_alert(
+    bot,
+    member: discord.Member,
+    assessment: RiskAssessment,
+    attempt_id: int,
+) -> None:
+    channel = await _staff_channel(bot)
+    if channel is None:
+        raise RuntimeError("No se pudo localizar el canal de alertas del staff.")
+
+    main_user_id = assessment.possible_main_user_id
+    content = (
+        f"Posible ALT-ACCOUNT {member.mention} ({member.id}) - "
+        f"Main Acc: <@{main_user_id}> ({main_user_id})"
+    )
+    reasons = "\n".join(f"- {reason}" for reason in assessment.reasons)
+    embed = discord.Embed(
+        title="Revision de Verificacion SA",
+        color=(
+            discord.Color.red()
+            if assessment.level == "high"
+            else discord.Color.orange()
+        ),
+        timestamp=datetime.now(timezone.utc),
+    )
+    embed.add_field(
+        name="Usuario detectado",
+        value=f"{member.mention}\n`{member.id}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Posible cuenta principal",
+        value=f"<@{main_user_id}>\n`{main_user_id}`",
+        inline=True,
+    )
+    embed.add_field(
+        name="Riesgo",
+        value=f"{assessment.level.upper()} ({assessment.score}/100)",
+        inline=True,
+    )
+    embed.add_field(
+        name="Coincidencias",
+        value=reasons[:1024] or "Sin motivos detallados",
+        inline=False,
+    )
+    embed.add_field(
+        name="VPN / Proxy",
+        value="No evaluado en esta fase",
+        inline=True,
+    )
+    embed.add_field(
+        name="Verificacion interna",
+        value=f"`{attempt_id}`",
+        inline=True,
+    )
+    embed.set_footer(
+        text=(
+            "La coincidencia es una senal preventiva y requiere revision humana."
+        )
+    )
+    await channel.send(
+        content,
+        embed=embed,
+        allowed_mentions=discord.AllowedMentions(
+            everyone=False,
+            users=True,
+            roles=False,
+            replied_user=False,
+        ),
+    )
+
+
+async def _send_role_error_alert(
+    bot,
+    member: discord.Member,
+    attempt_id: int,
+    reason: str,
+) -> None:
+    channel = await _staff_channel(bot)
+    if channel is None:
+        return
+    embed = discord.Embed(
+        title="Error al otorgar rol de Verificacion SA",
+        description=(
+            f"Usuario: {member.mention} (`{member.id}`)\n"
+            f"Verificacion: `{attempt_id}`\n"
+            f"Motivo: {reason[:500]}"
+        ),
+        color=discord.Color.red(),
+        timestamp=datetime.now(timezone.utc),
+    )
+    await channel.send(embed=embed)
+
+
 def create_verification_app(bot) -> web.Application:
     allowed_origin = _frontend_origin()
     configured_guild_id = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
@@ -280,6 +424,7 @@ def create_verification_app(bot) -> web.Application:
         try:
             client_ip = _client_ip(request)
             ip_hash = hash_ip_address(client_ip)
+            ip_network_hash = hash_ip_network(client_ip)
             browser_family = _browser_family(signals["user_agent"])
             os_family = _os_family(signals["user_agent"])
             fingerprint_basis = {
@@ -315,6 +460,7 @@ def create_verification_app(bot) -> web.Application:
                 user_id=verification_token.user_id,
                 discord_tag=str(member)[:128],
                 ip_hash=ip_hash,
+                ip_network_hash=ip_network_hash,
                 fingerprint_hash=fingerprint_hash,
                 country_code=_country_code(request),
                 region=None,
@@ -340,6 +486,117 @@ def create_verification_app(bot) -> web.Application:
 
         if attempt is None:
             return _error_response("invalid_or_expired_link", 400)
+
+        try:
+            candidates = await database.get_verification_match_candidates(
+                verification_token.guild_id,
+                verification_token.user_id,
+                ip_hash,
+                ip_network_hash,
+                fingerprint_hash,
+            )
+            assessment = assess_verification_risk(
+                attempt,
+                candidates,
+                now=current_time,
+            )
+        except Exception:
+            logger.exception(
+                "No se pudo evaluar el riesgo de la verificacion %s.",
+                attempt["id"],
+            )
+            return _error_response("temporarily_unavailable", 503)
+
+        if assessment.requires_review:
+            try:
+                await database.finalize_verification_attempt(
+                    attempt["id"],
+                    risk_score=assessment.score,
+                    risk_level=assessment.level,
+                    decision="review",
+                    role_granted=False,
+                    possible_main_user_id=assessment.possible_main_user_id,
+                    risk_reasons=list(assessment.reasons),
+                )
+            except Exception:
+                logger.exception(
+                    "No se pudo finalizar la verificacion en revision %s.",
+                    attempt["id"],
+                )
+                return _error_response("temporarily_unavailable", 503)
+
+            try:
+                await _send_review_alert(
+                    bot,
+                    member,
+                    assessment,
+                    attempt["id"],
+                )
+            except Exception:
+                logger.exception(
+                    "No se pudo enviar la alerta de la verificacion %s.",
+                    attempt["id"],
+                )
+            return web.json_response({"status": "accepted"}, status=202)
+
+        role_added = False
+        try:
+            role_added = await _grant_verified_role(member)
+        except (RoleGrantError, discord.HTTPException) as exc:
+            logger.exception(
+                "No se pudo otorgar el rol de verificacion al usuario %s.",
+                member.id,
+            )
+            try:
+                await database.finalize_verification_attempt(
+                    attempt["id"],
+                    risk_score=assessment.score,
+                    risk_level=assessment.level,
+                    decision="error",
+                    role_granted=False,
+                    possible_main_user_id=None,
+                    risk_reasons=["No fue posible otorgar el rol verificado"],
+                )
+                await _send_role_error_alert(
+                    bot,
+                    member,
+                    attempt["id"],
+                    str(exc),
+                )
+            except Exception:
+                logger.exception(
+                    "No se pudo registrar o alertar el error de rol de %s.",
+                    attempt["id"],
+                )
+            return web.json_response({"status": "accepted"}, status=202)
+
+        try:
+            finalized = await database.finalize_verification_attempt(
+                attempt["id"],
+                risk_score=assessment.score,
+                risk_level=assessment.level,
+                decision="approved",
+                role_granted=True,
+                possible_main_user_id=None,
+                risk_reasons=list(assessment.reasons),
+            )
+            if finalized is None:
+                raise RuntimeError("La verificacion pendiente ya no existe.")
+        except Exception:
+            logger.exception(
+                "No se pudo guardar la aprobacion de la verificacion %s.",
+                attempt["id"],
+            )
+            if role_added:
+                try:
+                    await _remove_verified_role(member)
+                except discord.HTTPException:
+                    logger.exception(
+                        "No se pudo revertir el rol del usuario %s.",
+                        member.id,
+                    )
+            return _error_response("temporarily_unavailable", 503)
+
         return web.json_response({"status": "accepted"}, status=202)
 
     async def options(_request: web.Request) -> web.Response:

@@ -126,6 +126,21 @@ def hash_ip_address(ip_address: str) -> str:
     return _privacy_digest("verification-ip:v1", canonical_ip)
 
 
+def hash_ip_network(ip_address: str) -> str:
+    try:
+        parsed_ip = ipaddress.ip_address(ip_address)
+    except ValueError as exc:
+        raise ValueError("Direccion IP invalida.") from exc
+
+    prefix_length = 24 if parsed_ip.version == 4 else 64
+    network = ipaddress.ip_network(
+        f"{parsed_ip.compressed}/{prefix_length}",
+        strict=False,
+    )
+    canonical_network = f"ipv{parsed_ip.version}:{network.with_prefixlen}"
+    return _privacy_digest("verification-ip-network:v1", canonical_network)
+
+
 def hash_limited_fingerprint(signals: Mapping[str, object]) -> str:
     canonical_signals = json.dumps(
         dict(signals),
