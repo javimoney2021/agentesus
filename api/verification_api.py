@@ -337,6 +337,27 @@ async def _send_role_error_alert(
     await channel.send(embed=embed)
 
 
+async def _send_success_alert(bot, member: discord.Member) -> None:
+    channel = await _staff_channel(bot)
+    if channel is None:
+        raise RuntimeError("No se pudo localizar el canal de alertas del staff.")
+
+    role = member.guild.get_role(VERIFIED_ROLE_ID)
+    role_mention = role.mention if role is not None else f"<@&{VERIFIED_ROLE_ID}>"
+    await channel.send(
+        (
+            f"😃 {member.mention} realizó la verificación exitosamente y "
+            f"se ha otorgado el rol {role_mention}."
+        ),
+        allowed_mentions=discord.AllowedMentions(
+            everyone=False,
+            users=True,
+            roles=False,
+            replied_user=False,
+        ),
+    )
+
+
 def create_verification_app(bot) -> web.Application:
     allowed_origin = _frontend_origin()
     configured_guild_id = int(GUILD_ID) if GUILD_ID and GUILD_ID.isdigit() else None
@@ -596,6 +617,14 @@ def create_verification_app(bot) -> web.Application:
                         member.id,
                     )
             return _error_response("temporarily_unavailable", 503)
+
+        try:
+            await _send_success_alert(bot, member)
+        except Exception:
+            logger.exception(
+                "No se pudo enviar el aviso de verificacion exitosa %s.",
+                attempt["id"],
+            )
 
         return web.json_response({"status": "accepted"}, status=202)
 
