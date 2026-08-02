@@ -505,6 +505,34 @@ async def finalize_verification_attempt(
         )
 
 
+async def clear_verification_records(guild_id, user_id):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT pg_advisory_xact_lock($1::BIGINT)",
+                user_id,
+            )
+            deleted_attempts = await conn.fetch(
+                """
+                DELETE FROM verification_attempts
+                WHERE guild_id=$1 AND user_id=$2
+                RETURNING id
+                """,
+                guild_id,
+                user_id,
+            )
+            deleted_tokens = await conn.fetch(
+                """
+                DELETE FROM verification_tokens
+                WHERE guild_id=$1 AND user_id=$2
+                RETURNING token_id
+                """,
+                guild_id,
+                user_id,
+            )
+            return len(deleted_attempts), len(deleted_tokens)
+
+
 async def get_all_registros():
     async with bot_pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM registros ORDER BY updated_at DESC")
