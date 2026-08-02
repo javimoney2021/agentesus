@@ -6,7 +6,7 @@ from discord.ext import commands, tasks
 
 from api.verification_api import VerificationAPIServer
 from core.config import GUILD_ID, TOKEN, get_missing_verification_settings, intents
-from core.database import init_db
+from core.database import init_db, purge_expired_verification_data
 from modules import posts, registro_eventos, registros, verificacion
 
 
@@ -43,6 +43,7 @@ class MyBot(commands.Bot):
         verificacion.setup(self)
 
         self.check_scheduled_posts_task.start()
+        self.cleanup_verification_data_task.start()
 
         if not GUILD_ID:
             print("❌ Falta GUILD_ID en las variables de entorno. No sincronizo comandos.")
@@ -60,6 +61,8 @@ class MyBot(commands.Bot):
             print("👉 Si esta lista sale vacía, tus comandos no están registrándose antes del sync.")
 
     async def close(self):
+        if self.cleanup_verification_data_task.is_running():
+            self.cleanup_verification_data_task.cancel()
         if self.verification_api is not None:
             await self.verification_api.stop()
         await super().close()
@@ -72,6 +75,26 @@ class MyBot(commands.Bot):
     async def before_check(self):
         await self.wait_until_ready()
         await asyncio.sleep(5)
+
+    @tasks.loop(hours=24)
+    async def cleanup_verification_data_task(self):
+        try:
+            deleted = await purge_expired_verification_data()
+        except Exception:
+            logger.exception("No se pudo aplicar la retencion de Verificacion SA.")
+            return
+        if any(deleted.values()):
+            print(
+                "🧹 Retencion de Verificacion SA aplicada: "
+                f"{deleted['attempts']} intento(s), "
+                f"{deleted['tokens']} token(s) y "
+                f"{deleted['antifraud']} señal(es) eliminados."
+            )
+
+    @cleanup_verification_data_task.before_loop
+    async def before_verification_cleanup(self):
+        await self.wait_until_ready()
+        await asyncio.sleep(30)
 
 
 bot = MyBot(command_prefix="_", intents=intents)

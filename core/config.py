@@ -51,6 +51,7 @@ STAFF_CHANNEL_ID = env_int("STAFF_CHANNEL_ID")
 FRONTEND_URL = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 TOKEN_EXPIRATION_MINUTES = max(1, env_int("TOKEN_EXPIRATION_MINUTES", 10))
 DATA_RETENTION_DAYS = max(1, env_int("DATA_RETENTION_DAYS", 90))
+ANTIFRAUD_RETENTION_DAYS = 400
 TOKEN_SECRET = os.getenv("TOKEN_SECRET", "").strip()
 IP_HASH_SECRET = os.getenv("IP_HASH_SECRET", "").strip()
 API_HOST = os.getenv("HOST", "0.0.0.0").strip() or "0.0.0.0"

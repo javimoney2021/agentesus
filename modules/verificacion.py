@@ -20,6 +20,21 @@ logger = logging.getLogger(__name__)
 ISSUE_COOLDOWN_SECONDS = 15
 RESULT_INTERACTION_LIFETIME_SECONDS = TOKEN_EXPIRATION_MINUTES * 60
 VERIFICATION_TICKET_CHANNEL_ID = 1399742637426081913
+VERIFIED_USERS_PER_PAGE = 10
+
+
+def _discord_timestamp(value, style: str = "d") -> str:
+    if value is None:
+        return "No disponible"
+    return f"<t:{int(value.timestamp())}:{style}>"
+
+
+def _format_country(country_code: str | None) -> str:
+    code = (country_code or "").strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        return "No disponible"
+    flag = "".join(chr(127397 + ord(character)) for character in code)
+    return f"{flag} {code}"
 
 
 class PersonalVerificationLinkView(discord.ui.View):
@@ -50,6 +65,81 @@ class VerificationPanelView(discord.ui.View):
         _button: discord.ui.Button,
     ):
         await self.manager.issue_personal_link(interaction)
+
+
+class VerifiedUsersPaginator(discord.ui.View):
+    def __init__(
+        self,
+        manager: "VerificationManager",
+        requested_by: int,
+        page: int,
+        total: int,
+    ):
+        super().__init__(timeout=180)
+        self.manager = manager
+        self.requested_by = requested_by
+        self.page = page
+        self.total = total
+        self._sync_buttons()
+
+    @property
+    def max_page(self) -> int:
+        return max(0, math.ceil(self.total / VERIFIED_USERS_PER_PAGE) - 1)
+
+    def _sync_buttons(self) -> None:
+        self.previous_page.disabled = self.page <= 0
+        self.next_page.disabled = self.page >= self.max_page
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.requested_by:
+            return True
+        await interaction.response.send_message(
+            "Solo quien ejecutó el comando puede navegar esta consulta.",
+            ephemeral=True,
+        )
+        return False
+
+    async def _change_page(
+        self,
+        interaction: discord.Interaction,
+        new_page: int,
+    ) -> None:
+        await interaction.response.defer()
+        try:
+            self.total = int(
+                await database.get_verified_users_count(interaction.guild.id)
+            )
+            self.page = min(max(0, new_page), self.max_page)
+            self._sync_buttons()
+            embed = await self.manager.verified_users_embed(
+                interaction.guild,
+                self.page,
+                self.total,
+            )
+        except Exception:
+            logger.exception("No se pudo cambiar la pagina de verificados.")
+            await interaction.followup.send(
+                "No fue posible actualizar la consulta en este momento.",
+                ephemeral=True,
+            )
+            return
+        await interaction.edit_original_response(embed=embed, view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous_page(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ):
+        await self._change_page(interaction, self.page - 1)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next_page(
+        self,
+        interaction: discord.Interaction,
+        _button: discord.ui.Button,
+    ):
+        await self._change_page(interaction, self.page + 1)
 
 
 class ClearVerificationRecordsView(discord.ui.View):
@@ -92,7 +182,7 @@ class ClearVerificationRecordsView(discord.ui.View):
             self._completed = True
             await interaction.response.defer()
             try:
-                attempts, tokens = await database.clear_verification_records(
+                deleted = await database.clear_verification_records(
                     self.target.guild.id,
                     self.target.id,
                 )
@@ -116,18 +206,25 @@ class ClearVerificationRecordsView(discord.ui.View):
             logger.warning(
                 (
                     "Registros de verificacion eliminados | ejecutor=%s | "
-                    "usuario=%s | intentos=%s | tokens=%s"
+                    "usuario=%s | intentos=%s | tokens=%s | "
+                    "antifraude=%s | perfiles=%s"
                 ),
                 interaction.user.id,
                 self.target.id,
-                attempts,
-                tokens,
+                deleted["attempts"],
+                deleted["tokens"],
+                deleted["antifraud"],
+                deleted["profiles"],
             )
             await interaction.edit_original_response(
                 content=(
                     f"Limpieza completada para {self.target.mention}.\n"
-                    f"Intentos eliminados: **{attempts}**\n"
-                    f"Tokens eliminados: **{tokens}**\n\n"
+                    f"Intentos eliminados: **{deleted['attempts']}**\n"
+                    f"Tokens eliminados: **{deleted['tokens']}**\n"
+                    f"Señales antifraude eliminadas: "
+                    f"**{deleted['antifraud']}**\n"
+                    f"Perfiles permanentes eliminados: "
+                    f"**{deleted['profiles']}**\n\n"
                     "El rol de Discord no fue modificado."
                 ),
                 embed=None,
@@ -225,6 +322,85 @@ class VerificationManager:
         ]
         for token_id in user_tokens:
             self._pending_result_interactions.pop(token_id, None)
+
+    async def verified_users_embed(
+        self,
+        guild: discord.Guild,
+        page: int,
+        total: int,
+    ) -> discord.Embed:
+        offset = page * VERIFIED_USERS_PER_PAGE
+        rows = await database.get_verified_users_page(
+            guild.id,
+            VERIFIED_USERS_PER_PAGE,
+            offset,
+        )
+        embed = discord.Embed(
+            title="Usuarios Verificados SA",
+            description=f"Registros permanentes: **{total}**",
+            color=discord.Color.blue(),
+        )
+
+        if not rows:
+            embed.description = "No hay usuarios verificados registrados."
+        for position, row in enumerate(rows, start=offset + 1):
+            user_id = int(row["user_id"])
+            member = guild.get_member(user_id)
+            if member is None:
+                try:
+                    member = await guild.fetch_member(user_id)
+                except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    member = None
+            created_at = (
+                member.created_at
+                if member is not None
+                else discord.utils.snowflake_time(user_id)
+            )
+            joined_at = member.joined_at if member is not None else None
+            joined_relative = (
+                f" ({_discord_timestamp(joined_at, 'R')})" if joined_at else ""
+            )
+            if member is None:
+                display_name = f"Usuario {user_id}"
+                role_status = "Fuera del servidor"
+            else:
+                display_name = discord.utils.escape_markdown(member.display_name)
+                role_status = (
+                    "Rol activo"
+                    if member.get_role(VERIFIED_ROLE_ID) is not None
+                    else "Sin rol verificado"
+                )
+
+            if row["risk_score"] is None:
+                latest_risk = "Detalle técnico purgado"
+            else:
+                risk_level = (row["risk_level"] or "sin nivel").upper()
+                latest_risk = f"{risk_level} ({row['risk_score']}/100)"
+
+            embed.add_field(
+                name=f"{position}. {display_name}",
+                value=(
+                    f"{member.mention if member else f'<@{user_id}>'} "
+                    f"(`{user_id}`)\n"
+                    f"Primera verificación: "
+                    f"{_discord_timestamp(row['first_verified_at'])}\n"
+                    f"Última verificación: "
+                    f"{_discord_timestamp(row['last_verified_at'])}\n"
+                    f"Cuenta creada: {_discord_timestamp(created_at)} "
+                    f"({_discord_timestamp(created_at, 'R')})\n"
+                    f"Ingreso al servidor: {_discord_timestamp(joined_at)}"
+                    f"{joined_relative}\n"
+                    f"País aproximado: "
+                    f"{_format_country(row['last_country_code'])}\n"
+                    f"Estado: **{role_status}** | Riesgo reciente: "
+                    f"**{latest_risk}**"
+                ),
+                inline=False,
+            )
+
+        max_page = max(1, math.ceil(total / VERIFIED_USERS_PER_PAGE))
+        embed.set_footer(text=f"Página {page + 1}/{max_page}")
+        return embed
 
     @staticmethod
     def panel_embed() -> discord.Embed:
@@ -408,11 +584,59 @@ def setup(bot):
         )
 
     @bot.tree.command(
+        name="usuarios_verificados",
+        description="(Staff) Consulta los usuarios verificados del servidor.",
+    )
+    @require_staff()
+    async def usuarios_verificados(interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "Este comando solo está disponible dentro del servidor.",
+                ephemeral=True,
+            )
+            return
+        if database.bot_pool is None:
+            await interaction.response.send_message(
+                DB_NO_DISPONIBLE,
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            total = int(
+                await database.get_verified_users_count(interaction.guild.id)
+            )
+            embed = await verification.verified_users_embed(
+                interaction.guild,
+                0,
+                total,
+            )
+        except Exception:
+            logger.exception("No se pudo consultar los usuarios verificados.")
+            await interaction.followup.send(
+                "No fue posible consultar los registros en este momento.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            embed=embed,
+            view=VerifiedUsersPaginator(
+                verification,
+                interaction.user.id,
+                0,
+                total,
+            ),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(
         name="limpiar_registro",
-        description="(Admin) Elimina el historial web de verificación de un usuario.",
+        description="(Admin) Elimina todos los datos de verificación de un usuario.",
     )
     @discord.app_commands.describe(
-        usuario="Usuario cuyos intentos y tokens serán eliminados.",
+        usuario="Usuario cuyos datos de verificación serán eliminados.",
     )
     async def limpiar_registro(
         interaction: discord.Interaction,
@@ -435,8 +659,9 @@ def setup(bot):
         embed = discord.Embed(
             title="Confirmar limpieza de verificación",
             description=(
-                f"Se eliminarán de PostgreSQL todos los intentos y tokens de "
-                f"{usuario.mention} (`{usuario.id}`).\n\n"
+                f"Se eliminarán de PostgreSQL los intentos, tokens, perfil "
+                f"permanente y señales antifraude de {usuario.mention} "
+                f"(`{usuario.id}`).\n\n"
                 "Esta acción es irreversible y no retirará su rol de Discord."
             ),
             color=discord.Color.red(),

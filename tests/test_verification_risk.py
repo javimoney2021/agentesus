@@ -108,6 +108,40 @@ class VerificationRiskTests(unittest.TestCase):
         self.assertEqual(result.score, 65)
         self.assertEqual(result.decision, "review")
 
+    def test_archived_exact_ip_alone_does_not_force_review(self):
+        candidate = attempt(
+            user_id=2,
+            fingerprint_hash="different-fingerprint",
+            country_code="AR",
+            timezone=None,
+            browser_family=None,
+            os_family=None,
+            device_type=None,
+            created_at=NOW - timedelta(days=100),
+        )
+
+        result = assess_verification_risk(attempt(), [candidate], now=NOW)
+
+        self.assertEqual(result.score, 45)
+        self.assertEqual(result.decision, "approved")
+
+    def test_archived_exact_ip_and_fingerprint_still_require_review(self):
+        candidate = attempt(
+            user_id=2,
+            country_code="AR",
+            timezone=None,
+            browser_family=None,
+            os_family=None,
+            device_type=None,
+            created_at=NOW - timedelta(days=100),
+        )
+
+        result = assess_verification_risk(attempt(), [candidate], now=NOW)
+
+        self.assertEqual(result.score, 90)
+        self.assertEqual(result.decision, "review")
+        self.assertEqual(result.possible_main_user_id, 2)
+
     def test_one_vpn_provider_forces_manual_review(self):
         result = assess_verification_risk(
             attempt(),
