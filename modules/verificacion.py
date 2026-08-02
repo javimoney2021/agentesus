@@ -25,7 +25,7 @@ class PersonalVerificationLinkView(discord.ui.View):
         super().__init__(timeout=TOKEN_EXPIRATION_MINUTES * 60)
         self.add_item(
             discord.ui.Button(
-                label="Continuar en la web",
+                label="Verificarme Ahora",
                 style=discord.ButtonStyle.link,
                 url=verification_url,
             )
@@ -59,21 +59,17 @@ class VerificationManager:
     @staticmethod
     def panel_embed() -> discord.Embed:
         embed = discord.Embed(
-            title="Verificación Super Sus SA",
-            description=(
-                "Verifica tu cuenta para acceder a la comunidad.\n\n"
-                "Presiona **Verificar** para recibir un enlace personal y temporal "
-                "visible únicamente para ti. Antes de continuar deberás leer y "
-                "aceptar el aviso de privacidad."
-            ),
+            title="Verificación Super Sus SA Oficial",
+            description="Conviértete en un usuario Verificado de la Comunidad...",
             color=discord.Color.blue(),
         )
-        embed.set_footer(
-            text=(
-                f"El enlace expira en {TOKEN_EXPIRATION_MINUTES} minutos "
-                "y solo puede utilizarse una vez."
+        embed.set_thumbnail(
+            url=(
+                "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
+                "verify.png"
             )
         )
+        embed.set_footer(text="Desarrollado por Agente SUS")
         return embed
 
     async def issue_personal_link(self, interaction: discord.Interaction):
@@ -152,14 +148,15 @@ class VerificationManager:
 
             self._last_issued_at[user_id] = asyncio.get_running_loop().time()
             embed = discord.Embed(
-                title="Tu enlace de verificación",
+                title="Proceso de Verificación.",
                 description=(
-                    "El enlace es personal, no lo compartas. "
-                    f"Caducará en **{TOKEN_EXPIRATION_MINUTES} minutos** "
-                    "y dejará de funcionar después de utilizarse."
+                    "Presiona **Verificarme Ahora** para recibir un enlace personal "
+                    "y temporal visible únicamente para ti. Te recomendamos leer "
+                    "y aceptar el aviso de privacidad."
                 ),
                 color=discord.Color.green(),
             )
+            embed.set_footer(text="El enlace solo puede utilizarse una vez.")
             await interaction.followup.send(
                 embed=embed,
                 view=PersonalVerificationLinkView(issued.verification_url),
