@@ -173,8 +173,60 @@ def setup(bot):
         description="(Staff) Publica el panel de verificación del servidor.",
     )
     @require_staff()
-    async def verificacion_sa(interaction: discord.Interaction):
-        await interaction.response.send_message(
-            embed=verification.panel_embed(),
-            view=VerificationPanelView(verification),
+    @discord.app_commands.describe(
+        canal="Canal donde se publicará el panel permanente de verificación.",
+    )
+    async def verificacion_sa(
+        interaction: discord.Interaction,
+        canal: discord.TextChannel,
+    ):
+        bot_member = canal.guild.me
+        if bot_member is None:
+            await interaction.response.send_message(
+                "No fue posible localizar al bot dentro del servidor.",
+                ephemeral=True,
+            )
+            return
+
+        permissions = canal.permissions_for(bot_member)
+        if not (
+            permissions.view_channel
+            and permissions.send_messages
+            and permissions.embed_links
+        ):
+            await interaction.response.send_message(
+                (
+                    "El bot necesita **Ver canal**, **Enviar mensajes** e "
+                    "**Insertar enlaces** en el canal seleccionado."
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            await canal.send(
+                embed=verification.panel_embed(),
+                view=VerificationPanelView(verification),
+            )
+        except discord.Forbidden:
+            await interaction.followup.send(
+                "Discord rechazó la publicación por falta de permisos en ese canal.",
+                ephemeral=True,
+            )
+            return
+        except discord.HTTPException:
+            logger.exception(
+                "No se pudo publicar el panel de verificacion en el canal %s.",
+                canal.id,
+            )
+            await interaction.followup.send(
+                "No fue posible publicar el panel. Inténtalo nuevamente más tarde.",
+                ephemeral=True,
+            )
+            return
+
+        await interaction.followup.send(
+            f"Panel permanente de verificación publicado en {canal.mention}.",
+            ephemeral=True,
         )
