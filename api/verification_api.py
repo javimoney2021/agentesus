@@ -28,6 +28,7 @@ from core.verification_security import (
     token_digest,
     validate_signed_verification_token,
 )
+from core.vpn_detection import VPNCheckResult, check_vpn_services
 
 
 logger = logging.getLogger(__name__)
@@ -283,16 +284,25 @@ async def _send_review_alert(
     assessment: RiskAssessment,
     attempt_id: int,
     country_code: str | None,
+    vpn_check: VPNCheckResult,
 ) -> None:
     channel = await _staff_channel(bot)
     if channel is None:
         raise RuntimeError("No se pudo localizar el canal de alertas del staff.")
 
     main_user_id = assessment.possible_main_user_id
-    content = (
-        f"Posible ALT-ACCOUNT {member.mention} ({member.id}) - "
-        f"Main Acc: <@{main_user_id}> ({main_user_id})"
-    )
+    if main_user_id is None:
+        content = (
+            f"Verificacion rechazada por VPN/Proxy {member.mention} "
+            f"({member.id})"
+        )
+        main_account_value = "No detectada"
+    else:
+        content = (
+            f"Posible ALT-ACCOUNT {member.mention} ({member.id}) - "
+            f"Main Acc: <@{main_user_id}> ({main_user_id})"
+        )
+        main_account_value = f"<@{main_user_id}>\n`{main_user_id}`"
     reasons = "\n".join(f"- {reason}" for reason in assessment.reasons)
     embed = discord.Embed(
         title="Revision de Verificacion SA",
@@ -310,7 +320,7 @@ async def _send_review_alert(
     )
     embed.add_field(
         name="Posible cuenta principal",
-        value=f"<@{main_user_id}>\n`{main_user_id}`",
+        value=main_account_value,
         inline=True,
     )
     embed.add_field(
@@ -325,7 +335,7 @@ async def _send_review_alert(
     )
     embed.add_field(
         name="VPN / Proxy",
-        value="No evaluado en esta fase",
+        value=vpn_check.discord_summary(),
         inline=True,
     )
     embed.add_field(
@@ -564,6 +574,14 @@ def create_verification_app(bot) -> web.Application:
         if attempt is None:
             return _error_response("invalid_or_expired_link", 400)
 
+        vpn_check = await check_vpn_services(client_ip)
+        if vpn_check.available_count == 0:
+            logger.warning(
+                "Evaluacion VPN omitida temporalmente | usuario=%s | intento=%s",
+                verification_token.user_id,
+                attempt["id"],
+            )
+
         try:
             candidates = await database.get_verification_match_candidates(
                 verification_token.guild_id,
@@ -576,6 +594,9 @@ def create_verification_app(bot) -> web.Application:
                 attempt,
                 candidates,
                 now=current_time,
+                account_created_at=member.created_at,
+                server_joined_at=member.joined_at,
+                vpn_detected_by=vpn_check.detected_providers,
             )
             logger.info(
                 (
@@ -627,6 +648,7 @@ def create_verification_app(bot) -> web.Application:
                     assessment,
                     attempt["id"],
                     attempt["country_code"],
+                    vpn_check,
                 )
             except Exception:
                 logger.exception(
