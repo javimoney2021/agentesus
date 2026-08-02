@@ -7,7 +7,7 @@ from discord.ext import commands, tasks
 from api.verification_api import VerificationAPIServer
 from core.config import GUILD_ID, TOKEN, get_missing_verification_settings, intents
 from core.database import init_db
-from modules import posts, registro_eventos, registros
+from modules import posts, registro_eventos, registros, verificacion
 
 
 logger = logging.getLogger(__name__)
@@ -40,6 +40,7 @@ class MyBot(commands.Bot):
         registros.setup(self)
         posts.setup(self)
         registro_eventos.setup(self)
+        verificacion.setup(self)
 
         self.check_scheduled_posts_task.start()
 
