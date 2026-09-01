@@ -63,11 +63,12 @@ EVENT_CATALOG_MAX_ITEMS = 5
 
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
 
-intents = discord.Intents.default()
+# Lista blanca de eventos necesarios: comandos en el servidor y el flujo interactivo
+# de publicaciones que lee mensajes enviados expresamente por el staff.
+intents = discord.Intents.none()
 intents.guilds = True
 intents.messages = True
 intents.message_content = True
-intents.members = True
 
 DB_NO_DISPONIBLE = "⚠️ La base de datos no está disponible temporalmente. Intenta de nuevo más tarde."
 

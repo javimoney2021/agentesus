@@ -191,6 +191,35 @@ async def send_post_to_channel(channel, content, attachment_urls):
     return await channel.send(content=content or "")
 
 
+def is_editable_post_message(message: discord.Message, bot_user_id: int) -> bool:
+    return (
+        message.author is not None
+        and message.author.id == bot_user_id
+        and message.type is discord.MessageType.default
+    )
+
+
+async def send_post_edit_preview(channel, source_message: discord.Message):
+    files = []
+    unavailable_urls = []
+    for attachment in source_message.attachments:
+        try:
+            files.append(await attachment.to_file(use_cached=True))
+        except (discord.HTTPException, OSError):
+            unavailable_urls.append(attachment.url)
+
+    content = source_message.content or "*Publicación sin contenido textual.*"
+    if unavailable_urls:
+        attachment_text = "\n".join(unavailable_urls)
+        available = 2000 - len(content) - 2
+        if available > 0:
+            content = f"{content}\n\n{attachment_text[:available]}"
+
+    if files:
+        return await channel.send(content=content, files=files)
+    return await channel.send(content=content)
+
+
 async def add_post_reactions(message: discord.Message, post_label):
     for emoji in POST_REACTION_EMOJIS:
         try:
@@ -327,6 +356,16 @@ class ChannelSelect(ui.ChannelSelect):
             return
 
         channel_id = self.values[0].id
+        if self.mode == "post_edit":
+            if channel_id != interaction.channel_id:
+                return await interaction.response.send_message(
+                    "⛔ Solo puedes editar mensajes del mismo canal donde ejecutaste `/post_edit`.",
+                    ephemeral=True,
+                )
+            return await interaction.response.send_modal(
+                PostEditMessageModal(view.author_id, channel_id)
+            )
+
         if self.mode == "instant":
             set_pending(interaction.user.id, {
                 "mode": "instant",
@@ -350,6 +389,91 @@ class ChannelSelectView(AuthorView):
     def __init__(self, author_id: int, mode: str):
         super().__init__(author_id)
         self.add_item(ChannelSelect(mode))
+
+
+class PostEditMessageModal(ui.Modal, title="Editar Publicación"):
+    message_id = ui.TextInput(
+        label="ID del mensaje",
+        placeholder="Pega aquí el ID de la publicación",
+        min_length=17,
+        max_length=20,
+    )
+
+    def __init__(self, author_id: int, channel_id: int):
+        super().__init__()
+        self.author_id = author_id
+        self.channel_id = channel_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "⛔ Esta acción no es tuya.",
+                ephemeral=True,
+            )
+
+        if interaction.channel_id != self.channel_id:
+            return await interaction.response.send_message(
+                "⛔ El mensaje debe pertenecer al canal donde ejecutaste `/post_edit`.",
+                ephemeral=True,
+            )
+
+        message_id_text = self.message_id.value.strip()
+        if not message_id_text.isdigit():
+            return await interaction.response.send_message(
+                "❌ El ID del mensaje solo puede contener números.",
+                ephemeral=True,
+            )
+
+        channel = interaction.guild.get_channel(self.channel_id)
+        if not isinstance(channel, discord.TextChannel):
+            return await interaction.response.send_message(
+                "❌ No se encontró el canal de texto seleccionado.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            source_message = await channel.fetch_message(int(message_id_text))
+        except discord.NotFound:
+            return await interaction.followup.send(
+                "❌ No se encontró un mensaje con ese ID en este canal.",
+                ephemeral=True,
+            )
+        except discord.HTTPException as error:
+            return await interaction.followup.send(
+                f"❌ No se pudo consultar el mensaje: {error}",
+                ephemeral=True,
+            )
+
+        bot_user = interaction.client.user
+        if bot_user is None or not is_editable_post_message(source_message, bot_user.id):
+            return await interaction.followup.send(
+                "⛔ Solo puedes editar publicaciones enviadas por este bot mediante `/post`.",
+                ephemeral=True,
+            )
+
+        try:
+            await send_post_edit_preview(channel, source_message)
+        except discord.HTTPException as error:
+            return await interaction.followup.send(
+                f"❌ No se pudo mostrar la publicación a editar: {error}",
+                ephemeral=True,
+            )
+
+        data = {
+            "mode": "post_edit",
+            "step": "awaiting_post_edit_content",
+            "target_channel_id": channel.id,
+            "message_id": source_message.id,
+            "origin_channel_id": interaction.channel_id,
+            "author_id": interaction.user.id,
+        }
+        set_pending(interaction.user.id, data)
+        await channel.send("📝 Escribe debajo el nuevo mensaje para esta publicación.")
+        await interaction.followup.send(
+            "✅ Publicación encontrada. Continúa en el canal con el nuevo contenido.",
+            ephemeral=True,
+        )
 
 
 class ScheduleModal(ui.Modal, title="Agendar Publicación"):
@@ -901,6 +1025,116 @@ class DeleteConfirmView(AuthorView):
         self.stop()
 
 
+class PostEditConfirmView(AuthorView):
+    def __init__(self, author_id: int, data):
+        super().__init__(author_id, timeout=300)
+        self.data = data
+        self.processing = False
+
+    async def begin_processing(self, interaction: discord.Interaction) -> bool:
+        if self.processing:
+            await interaction.response.send_message(
+                "⏳ Esta acción ya se está procesando.",
+                ephemeral=True,
+            )
+            return False
+
+        self.processing = True
+        for item in self.children:
+            item.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except discord.HTTPException:
+            self.processing = False
+            for item in self.children:
+                item.disabled = False
+            raise
+        return True
+
+    def clear_pending(self):
+        if PENDING_POSTS.get(self.author_id) is self.data:
+            PENDING_POSTS.pop(self.author_id, None)
+
+    @ui.button(label="Aceptar", style=discord.ButtonStyle.success)
+    async def accept(self, interaction: discord.Interaction, button: ui.Button):
+        if not await self.guard(interaction):
+            return
+        if pending_is_expired(self.data):
+            self.clear_pending()
+            self.stop()
+            return await interaction.response.edit_message(
+                content="⌛ El tiempo para editar la publicación expiró.",
+                view=None,
+            )
+        if not await self.begin_processing(interaction):
+            return
+
+        channel = interaction.guild.get_channel(self.data["target_channel_id"])
+        if not isinstance(channel, discord.TextChannel):
+            self.clear_pending()
+            self.stop()
+            return await interaction.edit_original_response(
+                content="❌ No se encontró el canal de la publicación.",
+                view=None,
+            )
+
+        try:
+            source_message = await channel.fetch_message(self.data["message_id"])
+        except discord.NotFound:
+            self.clear_pending()
+            self.stop()
+            return await interaction.edit_original_response(
+                content="❌ La publicación original ya no existe.",
+                view=None,
+            )
+        except discord.HTTPException as error:
+            self.processing = False
+            for item in self.children:
+                item.disabled = False
+            return await interaction.edit_original_response(
+                content=f"❌ No se pudo consultar la publicación: {error}",
+                view=self,
+            )
+
+        bot_user = interaction.client.user
+        if bot_user is None or not is_editable_post_message(source_message, bot_user.id):
+            self.clear_pending()
+            self.stop()
+            return await interaction.edit_original_response(
+                content="⛔ La publicación ya no pertenece a este bot.",
+                view=None,
+            )
+
+        try:
+            await source_message.edit(content=self.data["new_content"])
+        except discord.HTTPException as error:
+            self.processing = False
+            for item in self.children:
+                item.disabled = False
+            return await interaction.edit_original_response(
+                content=f"❌ No se pudo editar la publicación: {error}",
+                view=self,
+            )
+
+        self.clear_pending()
+        self.stop()
+        await interaction.edit_original_response(
+            content="✅ Publicación editada correctamente.",
+            view=None,
+        )
+
+    @ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
+    async def cancel(self, interaction: discord.Interaction, button: ui.Button):
+        if not await self.guard(interaction):
+            return
+        self.clear_pending()
+        self.stop()
+        await interaction.response.edit_message(
+            content="❌ Edición cancelada.",
+            view=None,
+        )
+
+
 async def handle_message(message: discord.Message) -> bool:
     if message.author.id not in PENDING_POSTS:
         return False
@@ -914,6 +1148,25 @@ async def handle_message(message: discord.Message) -> bool:
         PENDING_POSTS.pop(message.author.id, None)
         await edit_pending_panel(data, content="⌛ El tiempo para completar la publicación expiró.", embed=None, view=None)
         return False
+
+    if data.get("step") == "awaiting_post_edit_content":
+        new_content = message.content
+        if not new_content:
+            await message.reply(
+                "⚠️ Escribe el nuevo contenido textual de la publicación.",
+                mention_author=False,
+            )
+            return True
+
+        data["new_content"] = new_content
+        data["step"] = "awaiting_post_edit_confirmation"
+        confirmation = await message.reply(
+            "¿Deseas aplicar este nuevo contenido a la publicación?",
+            view=PostEditConfirmView(message.author.id, data),
+            mention_author=False,
+        )
+        data["panel_message"] = confirmation
+        return True
 
     if data.get("step") == "awaiting_content":
         if not message.content and not message.attachments:
@@ -1075,4 +1328,25 @@ def setup(bot):
             embed=build_panel_embed(interaction.guild_id),
             view=PostPanelView(interaction.user.id, interaction.guild_id),
             ephemeral=True
+        )
+
+    @bot.tree.command(
+        name="post_edit",
+        description="(Staff) Editar una publicación enviada por /post",
+    )
+    @require_staff()
+    async def post_edit(interaction: discord.Interaction):
+        if not interaction.guild or not isinstance(
+            interaction.channel,
+            discord.TextChannel,
+        ):
+            return await interaction.response.send_message(
+                "❌ Este comando solo puede utilizarse en un canal de texto del servidor.",
+                ephemeral=True,
+            )
+
+        await interaction.response.send_message(
+            "Selecciona el canal donde se encuentra la publicación a editar.",
+            view=ChannelSelectView(interaction.user.id, "post_edit"),
+            ephemeral=True,
         )
