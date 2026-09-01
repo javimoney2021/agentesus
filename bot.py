@@ -44,7 +44,11 @@ class MyBot(commands.Bot):
         await asyncio.sleep(5)
 
 
-bot = MyBot(command_prefix="_", intents=intents)
+bot = MyBot(
+    command_prefix=commands.when_mentioned,
+    help_command=None,
+    intents=intents,
+)
 
 
 @bot.event
@@ -57,10 +61,9 @@ async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
         return
 
-    if await posts.handle_message(message):
-        return
-
-    await bot.process_commands(message)
+    # No existen comandos por prefijo: el contenido solo se consulta dentro
+    # de los flujos temporales iniciados mediante /post o /post_edit.
+    await posts.handle_message(message)
 
 
 bot.run(TOKEN)
