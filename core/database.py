@@ -48,6 +48,7 @@ async def init_db():
                     nickname TEXT NOT NULL,
                     external_id TEXT NOT NULL,
                     country TEXT NOT NULL,
+                    retain_profile BOOLEAN NOT NULL DEFAULT TRUE,
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
                     PRIMARY KEY (guild_id, user_id),
@@ -100,6 +101,15 @@ async def init_db():
                     FOREIGN KEY (guild_id, user_id)
                         REFERENCES event_users(guild_id, user_id) ON DELETE RESTRICT
                 );
+                CREATE TABLE IF NOT EXISTS data_deletion_cooldowns (
+                    guild_id BIGINT NOT NULL,
+                    user_id BIGINT NOT NULL,
+                    requested_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    can_register_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                    PRIMARY KEY (guild_id, user_id)
+                );
+                ALTER TABLE event_users
+                    ADD COLUMN IF NOT EXISTS retain_profile BOOLEAN NOT NULL DEFAULT TRUE;
             """)
         print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
         async with bot_pool.acquire() as conn:
@@ -253,10 +263,24 @@ async def set_event_message(event_id: int, message_id: int):
 
 async def delete_event(event_id: int):
     async with bot_pool.acquire() as conn:
-        return await conn.fetchrow(
-            "DELETE FROM event_instances WHERE id=$1 RETURNING *",
-            event_id,
-        )
+        async with conn.transaction():
+            event = await conn.fetchrow(
+                "DELETE FROM event_instances WHERE id=$1 RETURNING *",
+                event_id,
+            )
+            if event:
+                await conn.execute("""
+                    DELETE FROM event_users AS users
+                    WHERE users.guild_id=$1
+                      AND users.retain_profile=FALSE
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM event_registrations AS registrations
+                          WHERE registrations.guild_id=users.guild_id
+                            AND registrations.user_id=users.user_id
+                      )
+                """, event["guild_id"])
+            return event
 
 
 async def close_active_event(guild_id: int):
@@ -499,6 +523,7 @@ async def register_event_participant(
     nickname: str | None,
     external_id: str | None,
     country: str | None,
+    retain_profile: bool = True,
 ):
     async with bot_pool.acquire() as conn:
         async with conn.transaction():
@@ -513,6 +538,15 @@ async def register_event_participant(
                 return "no_event", None
             if event["status"] != "open":
                 return "closed", None
+
+            cooldown = await conn.fetchrow("""
+                SELECT can_register_at
+                FROM data_deletion_cooldowns
+                WHERE guild_id=$1 AND user_id=$2
+                  AND can_register_at>CURRENT_TIMESTAMP
+            """, guild_id, user_id)
+            if cooldown:
+                return "cooldown", cooldown
 
             existing_registration = await conn.fetchrow("""
                 SELECT * FROM event_registrations
@@ -549,11 +583,13 @@ async def register_event_participant(
 
                 profile = await conn.fetchrow("""
                     INSERT INTO event_users (
-                        guild_id, user_id, discord_tag, nickname, external_id, country
+                        guild_id, user_id, discord_tag, nickname, external_id, country,
+                        retain_profile
                     )
-                    VALUES ($1, $2, $3, $4, $5, $6)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     RETURNING *
-                """, guild_id, user_id, discord_tag, nickname, external_id, country)
+                """, guild_id, user_id, discord_tag, nickname, external_id, country,
+                     retain_profile)
             else:
                 await conn.execute("""
                     UPDATE event_users
@@ -581,6 +617,113 @@ async def register_event_participant(
                 "event": event,
                 "profile": profile,
                 "registration": registration,
+            }
+
+
+async def get_data_deletion_cooldown(guild_id: int, user_id: int):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("""
+                DELETE FROM data_deletion_cooldowns
+                WHERE guild_id=$1 AND user_id=$2
+                  AND can_register_at<=CURRENT_TIMESTAMP
+            """, guild_id, user_id)
+            return await conn.fetchrow("""
+                SELECT requested_at, can_register_at
+                FROM data_deletion_cooldowns
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+
+
+async def cleanup_expired_data_deletion_cooldowns():
+    if bot_pool is None:
+        return
+    async with bot_pool.acquire() as conn:
+        await conn.execute("""
+            DELETE FROM data_deletion_cooldowns
+            WHERE can_register_at<=CURRENT_TIMESTAMP
+        """)
+
+
+async def delete_user_data_and_start_cooldown(
+    guild_id: int,
+    user_id: int,
+    cooldown_days: int,
+):
+    async with bot_pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", guild_id)
+            affected_events = await conn.fetch("""
+                SELECT DISTINCT event_id
+                FROM event_registrations
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+            registration_result = await conn.execute("""
+                DELETE FROM event_registrations
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+
+            for event in affected_events:
+                await conn.execute("""
+                    UPDATE event_registrations
+                    SET position=-position
+                    WHERE event_id=$1
+                """, event["event_id"])
+                await conn.execute("""
+                    WITH ordered AS (
+                        SELECT
+                            user_id,
+                            ROW_NUMBER() OVER (
+                                ORDER BY -position ASC, registered_at ASC, user_id ASC
+                            )::INTEGER AS new_position
+                        FROM event_registrations
+                        WHERE event_id=$1
+                    )
+                    UPDATE event_registrations AS registrations
+                    SET position=ordered.new_position,
+                        is_overflow=(
+                            instances.participant_limit > 0
+                            AND ordered.new_position > instances.participant_limit
+                        )
+                    FROM ordered, event_instances AS instances
+                    WHERE registrations.event_id=$1
+                      AND registrations.user_id=ordered.user_id
+                      AND instances.id=$1
+                """, event["event_id"])
+
+            profile_result = await conn.execute("""
+                DELETE FROM event_users
+                WHERE guild_id=$1 AND user_id=$2
+            """, guild_id, user_id)
+            history_result = await conn.execute(
+                "DELETE FROM registros WHERE user_id=$1",
+                user_id,
+            )
+            deleted_count = sum(
+                int(result.rsplit(" ", 1)[-1])
+                for result in (registration_result, profile_result, history_result)
+            )
+            if deleted_count:
+                cooldown = await conn.fetchrow("""
+                    INSERT INTO data_deletion_cooldowns (
+                        guild_id, user_id, requested_at, can_register_at
+                    )
+                    VALUES (
+                        $1, $2, CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP + ($3 * INTERVAL '1 day')
+                    )
+                    ON CONFLICT (guild_id, user_id) DO UPDATE
+                    SET requested_at=EXCLUDED.requested_at,
+                        can_register_at=EXCLUDED.can_register_at
+                    RETURNING requested_at, can_register_at
+                """, guild_id, user_id, cooldown_days)
+            else:
+                cooldown = None
+
+            return {
+                "deleted_count": deleted_count,
+                "affected_event_ids": [row["event_id"] for row in affected_events],
+                "cooldown": cooldown,
             }
 
 

@@ -1,6 +1,8 @@
-discord.py
+discord.py==2.7.1
 aiosqlite
 python-dotenv
+tzdata
 asyncpg
 aiohttp
 boto3
+openpyxl

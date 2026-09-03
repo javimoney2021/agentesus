@@ -59,16 +59,15 @@ EVENT_ALLOWED_CHANNEL_IDS = frozenset({
 })
 EVENT_PARTICIPANT_LIMITS = (0, 10, 15, 20)
 EVENT_CATALOG_MAX_ITEMS = 5
+SUPPORT_CHANNEL_ID = env_int("SUPPORT_CHANNEL_ID")
+DATA_DELETION_COOLDOWN_DAYS = 20
 
 
 TZ_BRASILIA = ZoneInfo("America/Sao_Paulo")
 
-# Lista blanca de eventos necesarios: comandos en el servidor y el flujo interactivo
-# de publicaciones que lee mensajes enviados expresamente por el staff.
+# Los flujos utilizan exclusivamente comandos, botones y modales.
 intents = discord.Intents.none()
 intents.guilds = True
-intents.messages = True
-intents.message_content = True
 
 DB_NO_DISPONIBLE = "⚠️ La base de datos no está disponible temporalmente. Intenta de nuevo más tarde."
 
@@ -86,7 +85,7 @@ def is_staff(interaction):
 def require_staff():
     async def predicate(interaction):
         if not is_staff(interaction):
-            await interaction.response.send_message("⛔ No tienes permisos.", ephemeral=False)
+            await interaction.response.send_message("⛔ No tienes permisos.", ephemeral=True)
             return False
         return True
     return app_commands.check(predicate)
@@ -96,6 +95,6 @@ async def db_unavailable(interaction: discord.Interaction) -> bool:
     from core import database
 
     if database.bot_pool is None:
-        await interaction.response.send_message(DB_NO_DISPONIBLE, ephemeral=False)
+        await interaction.response.send_message(DB_NO_DISPONIBLE, ephemeral=True)
         return True
     return False

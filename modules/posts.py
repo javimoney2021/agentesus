@@ -5,7 +5,7 @@ from urllib.parse import unquote, urlparse
 
 import aiohttp
 import discord
-from discord import app_commands, ui
+from discord import ui
 
 from core.config import TZ_BRASILIA, db_unavailable, require_staff
 from core.database import (
@@ -17,12 +17,9 @@ from core.database import (
 from core.r2_storage import delete_from_r2, upload_to_r2
 
 
-PENDING_POSTS = {}
 SCHEDULED_POSTS_CACHE = []
 MAX_PUBLISH_ATTEMPTS = 3
 R2_CLEANUP_DELAY_SECONDS = 30
-PENDING_TIMEOUT_SECONDS = 300
-SOURCE_MESSAGE_DELETE_DELAY_SECONDS = 2
 POST_REACTION_EMOJIS = (
     discord.PartialEmoji(name="E05emoji", id=1284825952903364702),
     discord.PartialEmoji(name="D04", id=998026873118400673),
@@ -106,60 +103,19 @@ async def cleanup_r2_now(urls):
         await delete_from_r2(url)
 
 
-async def delete_message_after_delay(message, delay_seconds=SOURCE_MESSAGE_DELETE_DELAY_SECONDS):
-    if message is None:
-        return
-
-    await asyncio.sleep(delay_seconds)
-    try:
-        await message.delete()
-    except Exception as e:
-        print(f"⚠️ No se pudo borrar el mensaje fuente del post: {e}")
-
-
-async def delete_message_safely(message, label="mensaje"):
-    if message is None:
-        return
-
-    try:
-        await message.delete()
-    except Exception as e:
-        print(f"⚠️ No se pudo borrar {label}: {e}")
-
-
-async def delete_previous_prompt(message, interaction):
-    if message is not None:
-        try:
-            await message.delete()
-            return
-        except Exception:
-            pass
-
-    if interaction is not None:
-        try:
-            await interaction.delete_original_response()
-        except Exception as e:
-            print(f"⚠️ No se pudo borrar la solicitud anterior del post: {e}")
-
-
-async def upload_message_attachments(message: discord.Message):
+async def upload_attachments(attachments: list[discord.Attachment]):
     r2_urls = []
-    if not message.attachments:
+    if not attachments:
         return r2_urls
 
-    async with aiohttp.ClientSession() as session:
-        for attachment in message.attachments:
-            try:
-                async with session.get(attachment.url) as resp:
-                    if resp.status == 200:
-                        file_bytes = await resp.read()
-                        r2_url = await upload_to_r2(file_bytes, attachment.filename)
-                        r2_urls.append(r2_url)
-                        print(f"✅ Adjunto subido a R2: {r2_url}")
-                    else:
-                        print(f"⚠️ No se pudo descargar adjunto de Discord: {attachment.url}")
-            except Exception as e:
-                print(f"⚠️ Error subiendo adjunto a R2: {e}")
+    try:
+        for attachment in attachments:
+            file_bytes = await attachment.read()
+            r2_url = await upload_to_r2(file_bytes, attachment.filename)
+            r2_urls.append(r2_url)
+    except Exception:
+        await cleanup_r2_now(r2_urls)
+        raise
     return r2_urls
 
 
@@ -199,27 +155,6 @@ def is_editable_post_message(message: discord.Message, bot_user_id: int) -> bool
     )
 
 
-async def send_post_edit_preview(channel, source_message: discord.Message):
-    files = []
-    unavailable_urls = []
-    for attachment in source_message.attachments:
-        try:
-            files.append(await attachment.to_file(use_cached=True))
-        except (discord.HTTPException, OSError):
-            unavailable_urls.append(attachment.url)
-
-    content = source_message.content or "*Publicación sin contenido textual.*"
-    if unavailable_urls:
-        attachment_text = "\n".join(unavailable_urls)
-        available = 2000 - len(content) - 2
-        if available > 0:
-            content = f"{content}\n\n{attachment_text[:available]}"
-
-    if files:
-        return await channel.send(content=content, files=files)
-    return await channel.send(content=content)
-
-
 async def add_post_reactions(message: discord.Message, post_label):
     for emoji in POST_REACTION_EMOJIS:
         try:
@@ -233,29 +168,6 @@ async def add_post_reactions(message: discord.Message, post_label):
 
 def pending_is_expired(data):
     return datetime.now(timezone.utc) > data.get("expires_at", datetime.now(timezone.utc))
-
-
-def set_pending(user_id, data):
-    data["expires_at"] = datetime.now(timezone.utc) + timedelta(seconds=PENDING_TIMEOUT_SECONDS)
-    PENDING_POSTS[user_id] = data
-
-
-async def edit_pending_panel(data, *, content=None, embed=None, view=None):
-    panel_message = data.get("panel_message")
-    if panel_message is not None:
-        try:
-            await panel_message.edit(content=content, embed=embed, view=view)
-            return
-        except Exception as e:
-            print(f"⚠️ No se pudo editar mensaje ephemeral de posts: {e}")
-
-    interaction = data.get("panel_interaction")
-    if interaction is None:
-        return
-    try:
-        await interaction.edit_original_response(content=content, embed=embed, view=view)
-    except Exception as e:
-        print(f"⚠️ No se pudo editar panel ephemeral de posts: {e}")
 
 
 class AuthorView(ui.View):
@@ -367,28 +279,119 @@ class ChannelSelect(ui.ChannelSelect):
             )
 
         if self.mode == "instant":
-            set_pending(interaction.user.id, {
+            return await interaction.response.send_modal(InstantPostModal(
+                view.author_id,
+                {
                 "mode": "instant",
-                "step": "awaiting_content",
                 "target_channel_id": channel_id,
-                "origin_channel_id": interaction.channel_id,
                 "author_id": interaction.user.id,
-                "panel_interaction": interaction,
-                "panel_message": interaction.message,
-            })
-            return await interaction.response.edit_message(
-                content="✅ Ahora posees 5 minutos para realizar tu publicación.",
-                embed=None,
-                view=None
-            )
+                },
+            ))
 
-        await interaction.response.send_modal(ScheduleModal(view.author_id, channel_id, interaction))
+        await interaction.response.send_modal(ScheduleModal(view.author_id, channel_id))
 
 
 class ChannelSelectView(AuthorView):
     def __init__(self, author_id: int, mode: str):
         super().__init__(author_id)
         self.add_item(ChannelSelect(mode))
+
+
+class InstantPostModal(ui.Modal, title="Crear Publicación"):
+    def __init__(self, author_id: int, data):
+        super().__init__()
+        self.author_id = author_id
+        self.data = data
+        self.content_input = ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="Contenido de la publicación",
+            required=False,
+            max_length=2000,
+        )
+        self.file_upload = ui.FileUpload(required=False, min_values=0, max_values=10)
+        self.thread_name = ui.TextInput(
+            placeholder="Déjalo vacío si no deseas crear un hilo",
+            required=False,
+            max_length=100,
+        )
+        self.add_item(ui.Label(text="Contenido", component=self.content_input))
+        self.add_item(ui.Label(text="Adjuntos opcionales", component=self.file_upload))
+        self.add_item(ui.Label(text="Nombre del hilo (opcional)", component=self.thread_name))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "⛔ Esta acción no es tuya.",
+                ephemeral=True,
+            )
+
+        content = self.content_input.value.strip()
+        selected_attachments = list(self.file_upload.values)
+        if not content and not selected_attachments:
+            return await interaction.response.send_message(
+                "❌ Debes proporcionar contenido, adjuntos o ambos.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            attachments = await upload_attachments(selected_attachments)
+        except Exception as error:
+            print(f"❌ Error procesando adjuntos del modal: {error}")
+            return await interaction.edit_original_response(
+                content="❌ No se pudieron procesar los adjuntos.",
+            )
+
+        self.data.update({
+            "content": content,
+            "attachments": attachments,
+            "thread_name": self.thread_name.value.strip() or None,
+            "title": post_title_from_content(content),
+        })
+        await interaction.edit_original_response(
+            content=None,
+            embed=build_instant_confirm_embed(self.data),
+            view=InstantConfirmView(self.author_id, self.data),
+        )
+
+
+class PostEditStartView(AuthorView):
+    def __init__(self, author_id: int, data):
+        super().__init__(author_id)
+        self.data = data
+
+    @ui.button(label="Redactar edición", style=discord.ButtonStyle.primary)
+    async def edit_content(self, interaction: discord.Interaction, button: ui.Button):
+        if not await self.guard(interaction):
+            return
+        await interaction.response.send_modal(PostEditContentModal(self.author_id, self.data))
+
+
+class PostEditContentModal(ui.Modal, title="Nuevo contenido"):
+    def __init__(self, author_id: int, data):
+        super().__init__()
+        self.author_id = author_id
+        self.data = data
+        self.content_input = ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="Escribe el contenido que reemplazará al actual",
+            max_length=2000,
+        )
+        self.add_item(ui.Label(text="Contenido", component=self.content_input))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "⛔ Esta acción no es tuya.",
+                ephemeral=True,
+            )
+        self.data["new_content"] = self.content_input.value
+        self.data["expires_at"] = datetime.now(timezone.utc) + timedelta(minutes=5)
+        await interaction.response.send_message(
+            "¿Deseas aplicar este nuevo contenido a la publicación?",
+            view=PostEditConfirmView(self.author_id, self.data),
+            ephemeral=True,
+        )
 
 
 class PostEditMessageModal(ui.Modal, title="Editar Publicación"):
@@ -453,7 +456,23 @@ class PostEditMessageModal(ui.Modal, title="Editar Publicación"):
             )
 
         try:
-            await send_post_edit_preview(channel, source_message)
+            files = []
+            unavailable_urls = []
+            for attachment in source_message.attachments:
+                try:
+                    files.append(await attachment.to_file(use_cached=True))
+                except (discord.HTTPException, OSError):
+                    unavailable_urls.append(attachment.url)
+            preview_content = source_message.content or "*Publicación sin contenido textual.*"
+            if unavailable_urls:
+                available = 2000 - len(preview_content) - 2
+                if available > 0:
+                    preview_content += "\n\n" + "\n".join(unavailable_urls)[:available]
+            await interaction.followup.send(
+                preview_content,
+                files=files,
+                ephemeral=True,
+            )
         except discord.HTTPException as error:
             return await interaction.followup.send(
                 f"❌ No se pudo mostrar la publicación a editar: {error}",
@@ -462,38 +481,48 @@ class PostEditMessageModal(ui.Modal, title="Editar Publicación"):
 
         data = {
             "mode": "post_edit",
-            "step": "awaiting_post_edit_content",
             "target_channel_id": channel.id,
             "message_id": source_message.id,
-            "origin_channel_id": interaction.channel_id,
             "author_id": interaction.user.id,
         }
-        set_pending(interaction.user.id, data)
-        await channel.send("📝 Escribe debajo el nuevo mensaje para esta publicación.")
         await interaction.followup.send(
-            "✅ Publicación encontrada. Continúa en el canal con el nuevo contenido.",
+            "✅ Publicación encontrada. Pulsa el botón para redactar el contenido nuevo.",
+            view=PostEditStartView(self.author_id, data),
             ephemeral=True,
         )
 
 
 class ScheduleModal(ui.Modal, title="Agendar Publicación"):
-    nombre = ui.TextInput(label="Nombre del Post", placeholder="Nombre visible del agendamiento", max_length=100)
-    fecha = ui.TextInput(label="Fecha", placeholder="DD/MM/AAAA", max_length=10)
-    hora = ui.TextInput(label="Hora", placeholder="HH:MM", max_length=5)
-
-    def __init__(self, author_id: int, channel_id: int, panel_interaction: discord.Interaction):
+    def __init__(self, author_id: int, channel_id: int):
         super().__init__()
         self.author_id = author_id
         self.channel_id = channel_id
-        self.panel_interaction = panel_interaction
-        self.panel_message = panel_interaction.message
+        self.nombre = ui.TextInput(placeholder="Nombre visible", max_length=100)
+        self.fecha_hora = ui.TextInput(placeholder="DD/MM/AAAA HH:MM", max_length=16)
+        self.content_input = ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            placeholder="Contenido de la publicación",
+            required=False,
+            max_length=2000,
+        )
+        self.file_upload = ui.FileUpload(required=False, min_values=0, max_values=10)
+        self.thread_name = ui.TextInput(
+            placeholder="Déjalo vacío si no deseas crear un hilo",
+            required=False,
+            max_length=100,
+        )
+        self.add_item(ui.Label(text="Nombre del post", component=self.nombre))
+        self.add_item(ui.Label(text="Fecha y hora", component=self.fecha_hora))
+        self.add_item(ui.Label(text="Contenido", component=self.content_input))
+        self.add_item(ui.Label(text="Adjuntos opcionales", component=self.file_upload))
+        self.add_item(ui.Label(text="Nombre del hilo (opcional)", component=self.thread_name))
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
             return await interaction.response.send_message("⛔ Esta acción no es tuya.", ephemeral=True)
 
         try:
-            dt_obj = datetime.strptime(f"{self.fecha.value} {self.hora.value}", "%d/%m/%Y %H:%M")
+            dt_obj = datetime.strptime(self.fecha_hora.value.strip(), "%d/%m/%Y %H:%M")
             scheduled_at = dt_obj.replace(tzinfo=TZ_BRASILIA)
         except ValueError:
             return await interaction.response.send_message(
@@ -508,21 +537,37 @@ class ScheduleModal(ui.Modal, title="Agendar Publicación"):
         if not title:
             return await interaction.response.send_message("❌ El nombre del post no puede estar vacío.", ephemeral=True)
 
-        set_pending(interaction.user.id, {
+        content = self.content_input.value.strip()
+        selected_attachments = list(self.file_upload.values)
+        if not content and not selected_attachments:
+            return await interaction.response.send_message(
+                "❌ Debes proporcionar contenido, adjuntos o ambos.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            attachments = await upload_attachments(selected_attachments)
+        except Exception as error:
+            print(f"❌ Error procesando adjuntos del modal: {error}")
+            return await interaction.edit_original_response(
+                content="❌ No se pudieron procesar los adjuntos.",
+            )
+
+        data = {
             "mode": "schedule",
-            "step": "awaiting_content",
             "channel_id": self.channel_id,
-            "origin_channel_id": self.panel_interaction.channel_id,
             "scheduled_at": scheduled_at,
             "title": title,
+            "content": content,
+            "attachments": attachments,
+            "thread_name": self.thread_name.value.strip() or None,
             "author_id": interaction.user.id,
-            "panel_interaction": interaction,
-            "panel_message": getattr(interaction, "message", None) or self.panel_message,
-        })
-        await interaction.response.edit_message(
-            content="✅ Ahora posees 5 minutos para agendar tu publicación.",
-            embed=None,
-            view=None
+        }
+        await interaction.edit_original_response(
+            content=None,
+            embed=build_schedule_confirm_embed(data),
+            view=ScheduleConfirmView(self.author_id, data),
         )
 
 
@@ -561,25 +606,14 @@ class ScheduledSelect(ui.Select):
                 view=DeleteConfirmView(view.author_id, post["id"])
             )
 
-        set_pending(interaction.user.id, {
+        data = {
             "mode": "edit",
-            "step": "awaiting_edit_content",
             "post_id": post["id"],
-            "origin_channel_id": interaction.channel_id,
             "author_id": interaction.user.id,
-            "panel_interaction": interaction,
-            "panel_message": interaction.message,
-        })
-        embed = discord.Embed(
-            title=f"Editando: {post['title']}",
-            description=post["content"] or "*Sin contenido textual.*",
-            color=discord.Color.orange()
+        }
+        await interaction.response.send_modal(
+            ScheduledContentModal(view.author_id, data, post)
         )
-        embed.add_field(name="Canal", value=f"<#{post['channel_id']}>", inline=True)
-        embed.add_field(name="Fecha", value=format_scheduled_at(post["scheduled_at"]), inline=True)
-        await interaction.response.edit_message(content=None, embed=embed, view=None)
-        await asyncio.sleep(1)
-        await interaction.edit_original_response(content="📝 Redacte la edición de su post.", embed=None, view=None)
 
 
 class ScheduledSelectView(AuthorView):
@@ -588,41 +622,66 @@ class ScheduledSelectView(AuthorView):
         self.add_item(ScheduledSelect(mode, guild_id))
 
 
-class ThreadChoiceView(AuthorView):
-    """Vista con botones SI / NO para decidir si se crea un hilo al publicar."""
-    @ui.button(label="SI", style=discord.ButtonStyle.success)
-    async def yes(self, interaction: discord.Interaction, button: ui.Button):
-        if not await self.guard(interaction):
-            return
-        if self.author_id in PENDING_POSTS:
-            PENDING_POSTS[self.author_id]["step"] = "awaiting_thread_name"
-            PENDING_POSTS[self.author_id]["panel_interaction"] = interaction
-            PENDING_POSTS[self.author_id]["panel_message"] = interaction.message
-        await interaction.response.edit_message(
-            content="📝 Escribe el **nombre del hilo** que se creará al publicar:",
-            embed=None, view=None
+class ScheduledContentModal(ui.Modal, title="Editar Agendamiento"):
+    def __init__(self, author_id: int, data, post):
+        super().__init__()
+        self.author_id = author_id
+        self.data = data
+        self.post = post
+        self.content_input = ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            default=post["content"] or "",
+            placeholder="Contenido de la publicación",
+            required=False,
+            max_length=2000,
         )
-        self.stop()
+        self.file_upload = ui.FileUpload(required=False, min_values=0, max_values=10)
+        self.add_item(ui.Label(text="Contenido", component=self.content_input))
+        self.add_item(ui.Label(
+            text="Nuevos adjuntos (opcional)",
+            description="Si no adjuntas archivos, la publicación quedará sin adjuntos.",
+            component=self.file_upload,
+        ))
 
-    @ui.button(label="NO", style=discord.ButtonStyle.danger)
-    async def no(self, interaction: discord.Interaction, button: ui.Button):
-        if not await self.guard(interaction):
-            return
-        data = PENDING_POSTS.pop(self.author_id, None)
-        if data is None:
-            await interaction.response.edit_message(content="❌ No se encontró la publicación pendiente.", embed=None, view=None)
-            self.stop()
-            return
-        data["thread_name"] = None
-        data["panel_interaction"] = interaction
-        data["panel_message"] = interaction.message
-        embed, view = build_post_confirmation(self.author_id, data)
-        await interaction.response.edit_message(
-            content=None,
-            embed=embed,
-            view=view,
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.author_id:
+            return await interaction.response.send_message(
+                "⛔ Esta acción no es tuya.",
+                ephemeral=True,
+            )
+        content = self.content_input.value.strip()
+        selected_attachments = list(self.file_upload.values)
+        if not content and not selected_attachments:
+            return await interaction.response.send_message(
+                "❌ Debes proporcionar contenido, adjuntos o ambos.",
+                ephemeral=True,
+            )
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            attachments = await upload_attachments(selected_attachments)
+        except Exception as error:
+            print(f"❌ Error procesando adjuntos del modal: {error}")
+            return await interaction.edit_original_response(
+                content="❌ No se pudieron procesar los adjuntos.",
+            )
+
+        self.data.update({
+            "content": content,
+            "attachments": attachments,
+            "title": self.post["title"],
+            "channel_id": self.post["channel_id"],
+        })
+        await interaction.edit_original_response(
+            content=(
+                f"El agendamiento **{self.post['title']}** será publicado en "
+                f"<#{self.post['channel_id']}> el "
+                f"**{format_scheduled_at(self.post['scheduled_at'])}**.\n\n"
+                "¿Deseas conservar esos datos?"
+            ),
+            embed=None,
+            view=EditDateChoiceView(self.author_id, self.data),
         )
-        self.stop()
 
 
 def build_schedule_confirm_embed(data):
@@ -646,6 +705,9 @@ class ScheduleConfirmView(AuthorView):
         super().__init__(author_id, timeout=60)
         self.data = data
         self.processing = False
+
+    async def on_timeout(self):
+        await cleanup_r2_now(self.data.get("attachments"))
 
     async def begin_processing(self, interaction: discord.Interaction) -> bool:
         if self.processing:
@@ -733,7 +795,6 @@ class ScheduleConfirmView(AuthorView):
                 "⚠️ El agendamiento se guardó, pero no se pudo actualizar "
                 f"la confirmación en Discord: {error}"
             )
-        interaction.client.loop.create_task(delete_message_after_delay(self.data.get("source_message")))
         self.stop()
 
     @ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
@@ -756,6 +817,9 @@ class InstantConfirmView(AuthorView):
         super().__init__(author_id, timeout=60)
         self.data = data
         self.processing = False
+
+    async def on_timeout(self):
+        await cleanup_r2_now(self.data.get("attachments"))
 
     async def begin_processing(self, interaction: discord.Interaction) -> bool:
         if self.processing:
@@ -799,7 +863,6 @@ class InstantConfirmView(AuthorView):
             )
         except Exception as e:
             await cleanup_r2_now(self.data.get("attachments"))
-            PENDING_POSTS.pop(interaction.user.id, None)
             await interaction.edit_original_response(
                 content=f"❌ Error al publicar: {e}",
                 embed=None,
@@ -821,7 +884,6 @@ class InstantConfirmView(AuthorView):
                 )
 
         interaction.client.loop.create_task(cleanup_r2_after_delay(self.data.get("attachments")))
-        PENDING_POSTS.pop(interaction.user.id, None)
         result_message = "✅ Publicación enviada correctamente."
         if thread_error is not None:
             result_message += " ⚠️ No se pudo crear el hilo solicitado."
@@ -830,7 +892,6 @@ class InstantConfirmView(AuthorView):
             embed=None,
             view=None,
         )
-        interaction.client.loop.create_task(delete_message_after_delay(self.data.get("source_message")))
         self.stop()
     @ui.button(label="Cancelar", style=discord.ButtonStyle.danger)
     async def cancel(self, interaction: discord.Interaction, button: ui.Button):
@@ -839,7 +900,6 @@ class InstantConfirmView(AuthorView):
         if not await self.begin_processing(interaction):
             return
         await cleanup_r2_now(self.data.get("attachments"))
-        PENDING_POSTS.pop(interaction.user.id, None)
         await interaction.edit_original_response(
             content="❌ Publicación cancelada.",
             embed=None,
@@ -883,6 +943,9 @@ class EditDateChoiceView(AuthorView):
         super().__init__(author_id)
         self.data = data
 
+    async def on_timeout(self):
+        await cleanup_r2_now(self.data.get("attachments"))
+
     @ui.button(label="Conservar", style=discord.ButtonStyle.success)
     async def keep(self, interaction: discord.Interaction, button: ui.Button):
         if not await self.guard(interaction):
@@ -896,24 +959,26 @@ class EditDateChoiceView(AuthorView):
             embed=build_edit_confirm_embed(self.data),
             view=EditConfirmView(self.author_id, self.data)
         )
+        self.stop()
 
     @ui.button(label="Editar", style=discord.ButtonStyle.secondary)
     async def edit(self, interaction: discord.Interaction, button: ui.Button):
         if not await self.guard(interaction):
             return
-        await interaction.response.send_modal(EditScheduleModal(self.author_id, self.data, interaction))
+        await interaction.response.send_modal(
+            EditScheduleModal(self.author_id, self.data, self)
+        )
 
 
 class EditScheduleModal(ui.Modal, title="Editar Fecha"):
     fecha = ui.TextInput(label="Fecha", placeholder="DD/MM/AAAA", max_length=10)
     hora = ui.TextInput(label="Hora", placeholder="HH:MM", max_length=5)
 
-    def __init__(self, author_id: int, data, panel_interaction: discord.Interaction):
+    def __init__(self, author_id: int, data, parent_view: EditDateChoiceView):
         super().__init__()
         self.author_id = author_id
         self.data = data
-        self.panel_interaction = panel_interaction
-        self.panel_message = panel_interaction.message
+        self.parent_view = parent_view
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.user.id != self.author_id:
@@ -926,6 +991,7 @@ class EditScheduleModal(ui.Modal, title="Editar Fecha"):
         if scheduled_at <= datetime.now(TZ_BRASILIA):
             return await interaction.response.send_message("❌ La fecha y hora deben ser futuras.", ephemeral=True)
         self.data["scheduled_at"] = scheduled_at
+        self.parent_view.stop()
         await interaction.response.edit_message(
             content=None,
             embed=build_edit_confirm_embed(self.data),
@@ -951,6 +1017,9 @@ class EditConfirmView(AuthorView):
     def __init__(self, author_id: int, data):
         super().__init__(author_id, timeout=60)
         self.data = data
+
+    async def on_timeout(self):
+        await cleanup_r2_now(self.data.get("attachments"))
 
     @ui.button(label="Confirmar", style=discord.ButtonStyle.success)
     async def confirm(self, interaction: discord.Interaction, button: ui.Button):
@@ -978,7 +1047,6 @@ class EditConfirmView(AuthorView):
 
         post.update(dict(row))
         interaction.client.loop.create_task(cleanup_r2_after_delay(old_attachments))
-        PENDING_POSTS.pop(interaction.user.id, None)
         await interaction.response.edit_message(content="✅ Agendamiento actualizado correctamente.", embed=None, view=None)
         self.stop()
 
@@ -987,7 +1055,6 @@ class EditConfirmView(AuthorView):
         if not await self.guard(interaction):
             return
         await cleanup_r2_now(self.data.get("attachments"))
-        PENDING_POSTS.pop(interaction.user.id, None)
         await interaction.response.edit_message(content="❌ Edición cancelada.", embed=None, view=None)
         self.stop()
 
@@ -1051,16 +1118,11 @@ class PostEditConfirmView(AuthorView):
             raise
         return True
 
-    def clear_pending(self):
-        if PENDING_POSTS.get(self.author_id) is self.data:
-            PENDING_POSTS.pop(self.author_id, None)
-
     @ui.button(label="Aceptar", style=discord.ButtonStyle.success)
     async def accept(self, interaction: discord.Interaction, button: ui.Button):
         if not await self.guard(interaction):
             return
         if pending_is_expired(self.data):
-            self.clear_pending()
             self.stop()
             return await interaction.response.edit_message(
                 content="⌛ El tiempo para editar la publicación expiró.",
@@ -1071,7 +1133,6 @@ class PostEditConfirmView(AuthorView):
 
         channel = interaction.guild.get_channel(self.data["target_channel_id"])
         if not isinstance(channel, discord.TextChannel):
-            self.clear_pending()
             self.stop()
             return await interaction.edit_original_response(
                 content="❌ No se encontró el canal de la publicación.",
@@ -1081,7 +1142,6 @@ class PostEditConfirmView(AuthorView):
         try:
             source_message = await channel.fetch_message(self.data["message_id"])
         except discord.NotFound:
-            self.clear_pending()
             self.stop()
             return await interaction.edit_original_response(
                 content="❌ La publicación original ya no existe.",
@@ -1116,7 +1176,6 @@ class PostEditConfirmView(AuthorView):
                 view=self,
             )
 
-        self.clear_pending()
         self.stop()
         await interaction.edit_original_response(
             content="✅ Publicación editada correctamente.",
@@ -1127,131 +1186,11 @@ class PostEditConfirmView(AuthorView):
     async def cancel(self, interaction: discord.Interaction, button: ui.Button):
         if not await self.guard(interaction):
             return
-        self.clear_pending()
         self.stop()
         await interaction.response.edit_message(
             content="❌ Edición cancelada.",
             view=None,
         )
-
-
-async def handle_message(message: discord.Message) -> bool:
-    if message.author.id not in PENDING_POSTS:
-        return False
-
-    data = PENDING_POSTS[message.author.id]
-    if data.get("origin_channel_id") != message.channel.id:
-        return False
-
-    if pending_is_expired(data):
-        await cleanup_r2_now(data.get("attachments"))
-        PENDING_POSTS.pop(message.author.id, None)
-        await edit_pending_panel(data, content="⌛ El tiempo para completar la publicación expiró.", embed=None, view=None)
-        return False
-
-    if data.get("step") == "awaiting_post_edit_content":
-        new_content = message.content
-        if not new_content:
-            await message.reply(
-                "⚠️ Escribe el nuevo contenido textual de la publicación.",
-                mention_author=False,
-            )
-            return True
-
-        data["new_content"] = new_content
-        data["step"] = "awaiting_post_edit_confirmation"
-        confirmation = await message.reply(
-            "¿Deseas aplicar este nuevo contenido a la publicación?",
-            view=PostEditConfirmView(message.author.id, data),
-            mention_author=False,
-        )
-        data["panel_message"] = confirmation
-        return True
-
-    if data.get("step") == "awaiting_content":
-        if not message.content and not message.attachments:
-            await edit_pending_panel(data, content="⚠️ Envía texto, adjuntos o ambos para continuar.", embed=None, view=None)
-            return True
-
-        data["content"] = message.content
-        data["source_message"] = message
-        data["attachments"] = await upload_message_attachments(message)
-
-        if data["mode"] == "instant":
-            data["title"] = post_title_from_content(message.content)
-
-        data["step"] = "awaiting_thread_choice"
-        previous_prompt = data.get("panel_message")
-        previous_interaction = data.get("panel_interaction")
-        control_message = await message.reply(
-            embed=discord.Embed(
-                title="¿Deseas crear un Hilo?",
-                description="El hilo se creará automáticamente cuando se publique el post.",
-                color=discord.Color.blurple()
-            ),
-            view=ThreadChoiceView(message.author.id),
-            mention_author=False
-        )
-        data["panel_message"] = control_message
-        data["panel_interaction"] = None
-        await delete_previous_prompt(previous_prompt, previous_interaction)
-        return True
-
-    if data.get("step") == "awaiting_thread_name":
-        thread_name = message.content.strip()
-        if not thread_name:
-            await edit_pending_panel(data, content="⚠️ El nombre del hilo no puede estar vacío. Escríbelo de nuevo.", embed=None, view=None)
-            return True
-        if len(thread_name) > 100:
-            await edit_pending_panel(
-                data,
-                content="⚠️ El nombre del hilo no puede superar 100 caracteres. Escríbelo de nuevo.",
-                embed=None,
-                view=None,
-            )
-            return True
-
-        data["thread_name"] = thread_name
-        PENDING_POSTS.pop(message.author.id)
-        embed, view = build_post_confirmation(message.author.id, data)
-        await edit_pending_panel(
-            data,
-            content=None,
-            embed=embed,
-            view=view,
-        )
-        return True
-
-    if data.get("step") == "awaiting_edit_content":
-        if not message.content and not message.attachments:
-            await edit_pending_panel(data, content="⚠️ Envía texto, adjuntos o ambos para continuar.", embed=None, view=None)
-            return True
-
-        post = find_cached_post(data["post_id"])
-        if not post:
-            PENDING_POSTS.pop(message.author.id, None)
-            await edit_pending_panel(data, content="❌ No se encontró el agendamiento.", embed=None, view=None)
-            return True
-
-        data["content"] = message.content
-        data["attachments"] = await upload_message_attachments(message)
-        data["title"] = post["title"]
-        data["channel_id"] = post["channel_id"]
-
-        await asyncio.sleep(1)
-        await edit_pending_panel(
-            data,
-            content=(
-                f"El agendamiento **{post['title']}** será publicado en <#{post['channel_id']}> "
-                f"el **{format_scheduled_at(post['scheduled_at'])}**.\n\n"
-                "¿Desea conservar esos datos?"
-            ),
-            embed=None,
-            view=EditDateChoiceView(message.author.id, data)
-        )
-        return True
-
-    return False
 
 
 async def publish_due_posts(bot):

@@ -4,7 +4,7 @@ import discord
 from discord.ext import commands, tasks
 
 from core.config import GUILD_ID, TOKEN, intents
-from core.database import init_db
+from core.database import cleanup_expired_data_deletion_cooldowns, init_db
 from modules import posts, registro_eventos, registros
 
 
@@ -37,6 +37,7 @@ class MyBot(commands.Bot):
     @tasks.loop(minutes=1)
     async def check_scheduled_posts_task(self):
         await posts.publish_due_posts(self)
+        await cleanup_expired_data_deletion_cooldowns()
 
     @check_scheduled_posts_task.before_loop
     async def before_check(self):
@@ -54,16 +55,6 @@ bot = MyBot(
 @bot.event
 async def on_ready():
     print(f"🤖 Bot conectado como {bot.user}")
-
-
-@bot.event
-async def on_message(message: discord.Message):
-    if message.author.bot or not message.guild:
-        return
-
-    # No existen comandos por prefijo: el contenido solo se consulta dentro
-    # de los flujos temporales iniciados mediante /post o /post_edit.
-    await posts.handle_message(message)
 
 
 bot.run(TOKEN)

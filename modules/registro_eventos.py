@@ -1,9 +1,14 @@
 import asyncio
 import logging
 import re
+from datetime import datetime
+from io import BytesIO
 
 import discord
 from discord import app_commands
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from core import database
 from core.config import (
@@ -17,6 +22,7 @@ from core.config import (
     EVENT_REJECTION_ALERT_CHANNEL_ID,
     EVENT_VERIFICATION_CHANNEL_ID,
     EVENT_VERIFIED_ROLE_ID,
+    TZ_BRASILIA,
     require_staff,
 )
 
@@ -44,6 +50,7 @@ FINAL_PARTICIPANTS_THUMBNAIL_URL = (
     "https://pub-a09b3609b6b34dfab5c7aa7742cd1a8a.r2.dev/"
     "Purple%20jack%20Harcode/FInal.png"
 )
+EXCEL_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 
 
 def has_role_id(member: discord.Member, role_id: int) -> bool:
@@ -73,6 +80,82 @@ def normalize_event_name(value: str) -> str:
 
 def limit_label(value: int) -> str:
     return "Sin limite" if value == 0 else str(value)
+
+
+def safe_excel_text(value) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(EXCEL_FORMULA_PREFIXES):
+        return f"'{text}"
+    return text
+
+
+def build_event_export(event, participants, exported_by: discord.Member) -> discord.File:
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Participantes"
+    sheet.freeze_panes = "A6"
+
+    sheet["A1"] = "Lista interna de participantes"
+    sheet["A1"].font = Font(size=16, bold=True, color="FFFFFF")
+    sheet["A1"].fill = PatternFill("solid", fgColor="D97706")
+    sheet.merge_cells("A1:H1")
+    sheet["A2"] = "Evento"
+    sheet["B2"] = safe_excel_text(event["event_name"])
+    sheet["A3"] = "Exportado por"
+    sheet["B3"] = safe_excel_text(f"{exported_by} ({exported_by.id})")
+    sheet["A4"] = "Fecha de exportacion"
+    sheet["B4"] = datetime.now(TZ_BRASILIA).replace(tzinfo=None)
+    sheet["B4"].number_format = "dd/mm/yyyy hh:mm"
+
+    headers = (
+        "Posicion",
+        "Estado",
+        "Usuario de Discord",
+        "Discord ID",
+        "Pais",
+        "Nickname",
+        "ID Espacial",
+        "Fecha de inscripcion",
+    )
+    sheet.append(headers)
+    for cell in sheet[5]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="374151")
+        cell.alignment = Alignment(horizontal="center")
+
+    for participant in participants:
+        registered_at = participant["registered_at"]
+        if registered_at is not None and registered_at.tzinfo is not None:
+            registered_at = registered_at.astimezone(TZ_BRASILIA).replace(tzinfo=None)
+        sheet.append((
+            participant["position"],
+            "Suplente" if participant["is_overflow"] else "Principal",
+            safe_excel_text(participant["discord_tag"]),
+            safe_excel_text(participant["user_id"]),
+            safe_excel_text(participant["country"]),
+            safe_excel_text(participant["nickname"]),
+            safe_excel_text(participant["external_id"]),
+            registered_at,
+        ))
+        sheet.cell(sheet.max_row, 8).number_format = "dd/mm/yyyy hh:mm"
+
+    sheet.auto_filter.ref = f"A5:H{max(sheet.max_row, 5)}"
+    widths = (11, 13, 24, 22, 18, 24, 18, 22)
+    for index, width in enumerate(widths, start=1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row in sheet.iter_rows(min_row=5):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top")
+
+    workbook.properties.creator = "Agente SUS"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    output.seek(0)
+
+    safe_name = re.sub(r"[^A-Za-z0-9_-]+", "_", event["event_name"]).strip("_")
+    filename = f"participantes_{safe_name[:50] or 'evento'}_{event['id']}.xlsx"
+    return discord.File(output, filename=filename)
 
 
 async def send_ephemeral(interaction: discord.Interaction, content=None, **kwargs):
@@ -404,6 +487,14 @@ class RegistrationModal(discord.ui.Modal, title="Inscripción al Evento"):
     def __init__(self, manager: "RegistroEventos"):
         super().__init__()
         self.manager = manager
+        self.retain_profile = discord.ui.Checkbox(default=False)
+        self.add_item(discord.ui.Label(
+            text="Guardar perfil para próximos eventos",
+            description=(
+                "Si no lo seleccionas, el perfil se eliminará al finalizar el evento."
+            ),
+            component=self.retain_profile,
+        ))
 
     async def on_submit(self, interaction: discord.Interaction):
         spatial_id = self.spatial_id.value.strip()
@@ -426,6 +517,7 @@ class RegistrationModal(discord.ui.Modal, title="Inscripción al Evento"):
             "nickname": nickname,
             "external_id": spatial_id,
             "country": country,
+            "retain_profile": self.retain_profile.value,
         }
         await self.manager.complete_registration(interaction, profile)
 
@@ -496,7 +588,7 @@ class FinishConfirmationView(OwnerView):
         self.event_name = event_name
         self.panel_message = panel_message
 
-    @discord.ui.button(label="Confirmar", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Finalizar y exportar", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.manager.finish_event(
             interaction,
@@ -1083,6 +1175,19 @@ class RegistroEventos:
         if not await self.require_database(interaction):
             return
 
+        cooldown = await database.get_data_deletion_cooldown(
+            interaction.guild.id,
+            interaction.user.id,
+        )
+        if cooldown:
+            available_at = int(cooldown["can_register_at"].timestamp())
+            await send_ephemeral(
+                interaction,
+                "Solicitaste eliminar tus datos. Podrás registrar un nuevo perfil "
+                f"<t:{available_at}:R>, el <t:{available_at}:F>.",
+            )
+            return
+
         if has_role_id(interaction.user, EVENT_PT_ROLE_ID):
             await send_ephemeral(
                 interaction,
@@ -1322,6 +1427,7 @@ class RegistroEventos:
                 nickname,
                 external_id,
                 country,
+                profile.get("retain_profile", True),
             )
         except Exception:
             logger.exception("Fallo al guardar una inscripción de evento")
@@ -1350,6 +1456,17 @@ class RegistroEventos:
 
         if status == "duplicate":
             await interaction.followup.send("Ya estas registrado en este evento.", ephemeral=True)
+            return
+
+        if status == "cooldown":
+            if not had_role:
+                await self.remove_role_safely(member, participant_role)
+            available_at = int(result["can_register_at"].timestamp())
+            await interaction.followup.send(
+                "Tu periodo de enfriamiento por eliminación de datos sigue activo. "
+                f"Podrás registrar un perfil <t:{available_at}:R>.",
+                ephemeral=True,
+            )
             return
 
         if not had_role:
@@ -1400,6 +1517,7 @@ class RegistroEventos:
         await interaction.response.send_message(
             embed=staff_panel_embed(active),
             view=StaffPanelView(self),
+            ephemeral=True,
         )
 
     async def show_participants(self, interaction: discord.Interaction):
@@ -1414,7 +1532,7 @@ class RegistroEventos:
             await send_ephemeral(interaction, "Este evento aun no tiene participantes.")
             return
 
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
             chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
             lines = [
@@ -1430,7 +1548,7 @@ class RegistroEventos:
             )
             embed.set_thumbnail(url=PARTICIPANTS_THUMBNAIL_URL)
             embed.set_footer(text=f"Total de inscritos: {len(participants)}")
-            await interaction.followup.send(embed=embed)
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     async def close_registration(self, interaction: discord.Interaction):
         if not interaction.guild or not await self.require_database(interaction):
@@ -1495,8 +1613,8 @@ class RegistroEventos:
             title="Confirmar Finalización",
             description=(
                 f"¿Deseas finalizar **{event['event_name']}**?\n\n"
-                "Se cerrarán las inscripciones, se publicará la lista final y se retirarán "
-                "los cargos después de 5 segundos."
+                "Se cerrarán las inscripciones, recibirás un Excel privado, se publicará "
+                "la lista final de menciones y se retirarán los cargos después de 5 segundos."
             ),
             color=discord.Color.red(),
         )
@@ -1509,7 +1627,7 @@ class RegistroEventos:
                 event["event_name"],
                 interaction.message,
             ),
-            ephemeral=False,
+            ephemeral=True,
         )
 
     async def finish_event(
@@ -1553,7 +1671,7 @@ class RegistroEventos:
         event,
         panel_message: discord.Message,
     ):
-        await interaction.response.defer(ephemeral=False)
+        await interaction.response.defer(ephemeral=True)
 
         if event["status"] == "open":
             event = await database.close_active_event(interaction.guild.id)
@@ -1569,12 +1687,35 @@ class RegistroEventos:
         participants = await database.get_event_participants(event["id"])
 
         try:
+            export_file = build_event_export(event, participants, interaction.user)
+            await interaction.edit_original_response(
+                content=(
+                    "Exportación interna generada. El archivo es visible únicamente para ti; "
+                    "descárgalo y trátalo como información confidencial del staff."
+                ),
+                embed=None,
+                view=None,
+                attachments=[export_file],
+            )
+        except Exception:
+            logger.exception("No se pudo generar o entregar la exportación del evento %s", event["id"])
+            await interaction.edit_original_response(
+                content=(
+                    "No se pudo generar o entregar el Excel privado. El evento quedó cerrado, "
+                    "pero no se publicaron resultados ni se limpiaron las inscripciones; puedes reintentar."
+                ),
+                embed=None,
+                view=None,
+                attachments=[],
+            )
+            return
+
+        try:
             if participants:
                 for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
                     chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
                     lines = [
-                        f"**{row['position']}.** <@{row['user_id']}> | "
-                        f"{row['nickname']} | ID: {row['external_id']}"
+                        f"**{row['position']}.** <@{row['user_id']}>"
                         for row in chunk
                     ]
                     embed = discord.Embed(
@@ -1642,7 +1783,10 @@ class RegistroEventos:
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-        summary = f"Evento **{event['event_name']}** finalizado y lista activa limpiada."
+        summary = (
+            f"Evento **{event['event_name']}** finalizado y lista activa limpiada. "
+            "El Excel interno permanece adjunto únicamente en esta respuesta efímera."
+        )
         if role_failures:
             summary += f" No se pudo retirar el rol a {role_failures} participante(s)."
         await interaction.edit_original_response(content=summary, embed=None, view=None)
@@ -2064,7 +2208,7 @@ class RegistroEventos:
             or not await self.require_database(interaction)
         ):
             return
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         profile = await database.get_event_user(interaction.guild.id, user_id)
         if not profile:
             await interaction.edit_original_response(
@@ -2123,7 +2267,7 @@ class RegistroEventos:
             or not await self.require_database(interaction)
         ):
             return
-        await interaction.response.defer()
+        await interaction.response.defer(ephemeral=True)
         try:
             status, result = await database.delete_event_user_profile(
                 interaction.guild.id,

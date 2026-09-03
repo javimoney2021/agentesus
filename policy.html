@@ -28,7 +28,7 @@
             <p class="eyebrow">Documento público</p>
             <h1>Política de privacidad</h1>
             <p class="lead">Cómo Agente SUS accede, utiliza, conserva y protege la información necesaria para sus funciones.</p>
-            <p class="meta">Vigente desde el 1 de septiembre de 2026 · Responsable del proyecto: <strong>newhozzi2026</strong></p>
+            <p class="meta">Vigente desde el 2 de septiembre de 2026 · Responsable del proyecto: <strong>newhozzi2026</strong></p>
             <div class="actions">
                 <a class="action-link secondary" href="terms.html">Consultar términos</a>
                 <a class="action-link secondary" href="index.html">Volver al inicio</a>
@@ -40,7 +40,7 @@
                 <strong>En esta página</strong>
                 <a href="#alcance">Alcance</a>
                 <a href="#datos">Datos tratados</a>
-                <a href="#mensajes">Mensajes</a>
+                <a href="#mensajes">Interacciones</a>
                 <a href="#finalidades">Finalidades</a>
                 <a href="#conservacion">Conservación</a>
                 <a href="#proveedores">Proveedores</a>
@@ -70,24 +70,27 @@
                         <li>ID del servidor, canal, mensaje y usuario que ejecuta una operación administrativa.</li>
                         <li>Nickname, ID Espacial y país proporcionados voluntariamente al registrarse en un evento.</li>
                         <li>Evento seleccionado, posición, condición de participante principal o suplente y fecha de inscripción.</li>
+                        <li>Exportación interna de cierre con usuario de Discord, país, nickname, ID Espacial, posición y estado de participación.</li>
                         <li>Discord ID e ID Espacial añadidas por staff autorizado a controles preventivos o blacklist.</li>
                         <li>Registros históricos de Discord ID, etiqueta, nickname e ID Espacial conservados en el baúl de consultas.</li>
                         <li>Contenido, archivos adjuntos, nombre del post, canal, fecha y posible hilo de una publicación agendada.</li>
+                        <li>ID de Discord, servidor y fecha límite de enfriamiento cuando el usuario solicita eliminar sus datos.</li>
                     </ul>
                     <p>El bot no solicita contraseñas, tokens de usuario, correos electrónicos ni información financiera.</p>
                 </section>
 
                 <section id="mensajes">
-                    <h2>3. Uso de Message Content</h2>
+                    <h2>3. Interacciones y contenido de publicaciones</h2>
                     <p>
-                        Agente SUS utiliza el intent privilegiado <strong>Message Content</strong> únicamente para completar
-                        flujos de `/post` y `/post_edit` iniciados por un miembro autorizado del staff. Durante una ventana
-                        temporal, el bot espera del mismo usuario y canal el texto, los adjuntos o el nombre del hilo solicitado.
+                        Agente SUS no solicita ni utiliza el intent privilegiado <strong>Message Content</strong>. Los flujos
+                        de `/post` reciben texto, archivos adjuntos y el nombre opcional del hilo mediante formularios modales
+                        de Discord. `/post_edit` recibe mediante modal el texto sustituto. Ambos flujos deben ser iniciados
+                        expresamente por un miembro autorizado del staff.
                     </p>
                     <p>
-                        Los mensajes que no pertenecen a un flujo pendiente se descartan de la mecánica. El bot no utiliza
-                        este acceso para moderación automática, vigilancia general, análisis de conversaciones, publicidad,
-                        elaboración de perfiles ni entrenamiento de modelos de inteligencia artificial.
+                        El bot no lee mensajes generales del servidor ni utiliza conversaciones para moderación automática,
+                        vigilancia, publicidad, elaboración de perfiles o entrenamiento de inteligencia artificial. Solo se
+                        procesa el contenido remitido voluntariamente dentro de la interacción administrativa correspondiente.
                     </p>
                 </section>
 
@@ -96,6 +99,7 @@
                     <ul>
                         <li>Publicar y programar comunicaciones informativas recurrentes de la comunidad.</li>
                         <li>Administrar eventos, cupos, suplencias y cargos temporales de participantes.</li>
+                        <li>Entregar al miembro autorizado que finaliza el evento una lista operativa temporal para la coordinación interna.</li>
                         <li>Recordar perfiles de inscripción para eventos futuros y evitar IDs Espaciales duplicadas.</li>
                         <li>Permitir consultas preventivas y controles de participación por staff autorizado.</li>
                         <li>Mantener la seguridad, integridad y continuidad técnica de las funciones declaradas.</li>
@@ -107,10 +111,13 @@
                     <ul>
                         <li>Los agendamientos se conservan hasta su publicación, cancelación o fallo definitivo.</li>
                         <li>Los adjuntos de publicaciones se programan para limpieza después de la publicación o terminación del flujo; una incidencia del proveedor puede retrasarla.</li>
-                        <li>Las inscripciones de un evento se eliminan al finalizarlo.</li>
-                        <li>Los perfiles de eventos se conservan para futuras inscripciones hasta que sean eliminados por staff o a solicitud del usuario.</li>
+                        <li>Las inscripciones activas se eliminan al finalizar el evento.</li>
+                        <li>La exportación de cierre se genera en memoria y se adjunta únicamente a una respuesta efímera visible para el miembro autorizado que finaliza el evento. Agente SUS no la guarda en disco, base de datos ni almacenamiento de objetos; quien la descargue debe eliminarla cuando deje de ser necesaria.</li>
+                        <li>Al crear un perfil, el participante puede autorizar su conservación para próximos eventos. Si no lo autoriza, el perfil se elimina automáticamente al finalizar el evento.</li>
+                        <li>Los perfiles cuya conservación fue autorizada permanecen disponibles para futuras inscripciones hasta que sean eliminados por staff o a solicitud del usuario.</li>
                         <li>El catálogo y la blacklist se conservan hasta su remoción administrativa; actualmente no cuentan con caducidad automática.</li>
                         <li>Los registros históricos se mantienen mientras continúe su finalidad preventiva o hasta que proceda una solicitud válida de modificación o eliminación.</li>
+                        <li>Después de una eliminación solicitada por el usuario se conserva únicamente su ID de Discord, el ID del servidor y las fechas de solicitud y vencimiento durante 20 días, con la finalidad de aplicar el periodo de enfriamiento. El registro deja de utilizarse al vencer ese plazo.</li>
                     </ul>
                     <p>
                         Cuando el tratamiento deje de ser necesario para la función declarada, los datos deberán eliminarse,
@@ -122,7 +129,7 @@
                     <h2>6. Proveedores y transferencias</h2>
                     <p>
                         Para operar, Agente SUS utiliza Discord, un proveedor de alojamiento de la aplicación,
-                        un proveedor de PostgreSQL y Cloudflare R2 para adjuntos. Estos proveedores pueden procesar
+                        Aiven como proveedor de PostgreSQL y Cloudflare R2 para adjuntos. Estos proveedores pueden procesar
                         datos técnicos conforme a sus propios términos y ubicaciones de infraestructura.
                     </p>
                     <p>
@@ -134,13 +141,15 @@
                 <section id="derechos">
                     <h2>7. Solicitudes y derechos</h2>
                     <p>
-                        El usuario puede solicitar confirmación del tratamiento, acceso, corrección o eliminación de
-                        sus datos, según corresponda. La solicitud debe realizarse mediante el sistema oficial de tickets
-                        o contactando a <strong>newhozzi2026</strong> dentro del servidor donde opera Agente SUS.
+                        El usuario puede solicitar confirmación del tratamiento, acceso o corrección mediante el sistema
+                        oficial de tickets. Para eliminar el perfil del videojuego, el registro del baúl y las inscripciones
+                        almacenadas debe utilizar `/eliminar_datos` dentro del canal <strong>#soporte</strong>. El comando solo
+                        elimina los datos asociados a la propia cuenta que lo ejecuta y solicita una confirmación previa.
                     </p>
                     <p>
-                        Para impedir eliminaciones sobre cuentas ajenas, podrá solicitarse una verificación razonable
-                        de que la cuenta de Discord pertenece al solicitante.
+                        La eliminación inicia un periodo de enfriamiento de 20 días durante el cual no se podrá registrar
+                        un perfil nuevo. Las entradas de blacklist y otros controles administrativos justificados no se
+                        eliminan mediante este comando y deben revisarse o apelarse mediante el sistema oficial de soporte.
                     </p>
                 </section>
 
@@ -148,7 +157,8 @@
                     <h2>8. Seguridad e incidentes</h2>
                     <p>
                         Se aplican controles de acceso por roles y permisos, credenciales mediante variables de entorno
-                        y proveedores de infraestructura con mecanismos de protección. Ningún sistema es infalible;
+                        y proveedores de infraestructura con mecanismos de protección. Las consultas administrativas y la
+                        exportación de cierre se muestran mediante respuestas efímeras al miembro autorizado. Ningún sistema es infalible;
                         ante un incidente se investigará, limitará el acceso y se realizarán las notificaciones exigidas
                         por Discord o la legislación aplicable.
                     </p>
