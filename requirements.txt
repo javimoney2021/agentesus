@@ -1,8 +1,9 @@
 discord.py==2.7.1
-aiosqlite
-python-dotenv
-tzdata
-asyncpg
-aiohttp
-boto3
-openpyxl
+aiosqlite==0.22.1
+python-dotenv==1.2.4
+tzdata==2026.4
+asyncpg==0.32.0
+aiohttp==3.14.5
+boto3==1.43.116
+openpyxl==3.1.5
+certifi==2026.10.19
