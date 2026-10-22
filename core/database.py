@@ -1,16 +1,30 @@
+import asyncio
+
 import asyncpg
 
 from core.config import DATABASE_URL
 
 
 bot_pool = None
+_heartbeat_lock = asyncio.Lock()
 
 
 async def init_db():
     global bot_pool
+    new_pool = None
+    if not DATABASE_URL:
+        print("❌ Error conectando a la DB: falta DATABASE_URL.")
+        return False
+
     try:
-        bot_pool = await asyncpg.create_pool(DATABASE_URL)
-        async with bot_pool.acquire() as conn:
+        new_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=5,
+            command_timeout=15,
+            timeout=20,
+        )
+        async with new_pool.acquire() as conn:
             await conn.execute("""
                 CREATE TABLE IF NOT EXISTS registros (
                     user_id BIGINT PRIMARY KEY,
@@ -111,13 +125,54 @@ async def init_db():
                 ALTER TABLE event_users
                     ADD COLUMN IF NOT EXISTS retain_profile BOOLEAN NOT NULL DEFAULT TRUE;
             """)
-        print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
-        async with bot_pool.acquire() as conn:
+        async with new_pool.acquire() as conn:
             await conn.execute("""
                 ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS thread_name TEXT DEFAULT NULL;
             """)
+
+        previous_pool = bot_pool
+        bot_pool = new_pool
+        new_pool = None
+        if previous_pool is not None:
+            try:
+                await previous_pool.close()
+            except Exception as error:
+                print(f"⚠️ No se pudo cerrar el pool anterior de PostgreSQL: {error}")
+
+        print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
+        return True
     except Exception as e:
+        if new_pool is not None:
+            try:
+                await new_pool.close()
+            except Exception:
+                pass
         print(f"❌ Error conectando a la DB: {e}")
+        return False
+
+
+async def heartbeat_db() -> bool:
+    """Comprueba PostgreSQL y reconstruye el pool tras una desconexion."""
+    global bot_pool
+
+    async with _heartbeat_lock:
+        pool = bot_pool
+        if pool is not None:
+            try:
+                async with pool.acquire() as conn:
+                    await conn.fetchval("SELECT 1")
+                return True
+            except Exception as error:
+                print(f"⚠️ PostgreSQL no respondió al heartbeat: {error}")
+                if bot_pool is pool:
+                    bot_pool = None
+                try:
+                    await pool.close()
+                except Exception:
+                    pass
+
+        print("🔄 Intentando reconectar PostgreSQL...")
+        return await init_db()
 
 
 async def get_registro(user_id):

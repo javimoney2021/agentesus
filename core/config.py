@@ -45,6 +45,9 @@ def env_int(name: str, default: int = 0) -> int:
     return int(value) if value.isdigit() else default
 
 
+DB_HEARTBEAT_HOURS = max(1, env_int("DB_HEARTBEAT_HOURS", 12))
+
+
 # Registro y gestion de eventos.
 EVENT_VERIFIED_ROLE_ID = 1527103455313793136
 EVENT_PARTICIPANT_ROLE_ID = 1507215915396239410

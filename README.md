@@ -7,6 +7,7 @@ Bot administrativo de Discord para publicaciones e inscripciones de eventos.
 - `DISCORD_TOKEN`: token del bot.
 - `GUILD_ID`: servidor donde se sincronizan los comandos.
 - `DATABASE_URL`: conexión PostgreSQL con TLS.
+- `DB_HEARTBEAT_HOURS`: intervalo del heartbeat de PostgreSQL; por defecto, `12`.
 - `SUPPORT_CHANNEL_ID`: ID del canal `#soporte` autorizado para `/eliminar_datos`.
 - `STAFF_ROLES`: nombres de roles administrativos separados por comas.
 - `R2_ENDPOINT`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET`, `R2_PUBLIC_URL`: almacenamiento temporal de adjuntos.

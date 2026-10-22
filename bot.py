@@ -3,8 +3,12 @@ import asyncio
 import discord
 from discord.ext import commands, tasks
 
-from core.config import GUILD_ID, TOKEN, intents
-from core.database import cleanup_expired_data_deletion_cooldowns, init_db
+from core.config import DB_HEARTBEAT_HOURS, GUILD_ID, TOKEN, intents
+from core.database import (
+    cleanup_expired_data_deletion_cooldowns,
+    heartbeat_db,
+    init_db,
+)
 from modules import posts, registro_eventos, registros
 
 
@@ -18,6 +22,7 @@ class MyBot(commands.Bot):
         registro_eventos.setup(self)
 
         self.check_scheduled_posts_task.start()
+        self.database_heartbeat_task.start()
 
         if not GUILD_ID:
             print("❌ Falta GUILD_ID en las variables de entorno. No sincronizo comandos.")
@@ -36,6 +41,9 @@ class MyBot(commands.Bot):
 
     @tasks.loop(minutes=1)
     async def check_scheduled_posts_task(self):
+        if not await heartbeat_db():
+            print("⚠️ Se omitió el ciclo de publicaciones: PostgreSQL no está disponible.")
+            return
         await posts.publish_due_posts(self)
         await cleanup_expired_data_deletion_cooldowns()
 
@@ -43,6 +51,18 @@ class MyBot(commands.Bot):
     async def before_check(self):
         await self.wait_until_ready()
         await asyncio.sleep(5)
+
+    @tasks.loop(hours=DB_HEARTBEAT_HOURS)
+    async def database_heartbeat_task(self):
+        if await heartbeat_db():
+            print("✅ Heartbeat de PostgreSQL completado.")
+        else:
+            print("⚠️ Heartbeat de PostgreSQL falló; se reintentará en el próximo ciclo.")
+
+    @database_heartbeat_task.before_loop
+    async def before_database_heartbeat(self):
+        await self.wait_until_ready()
+        await asyncio.sleep(10)
 
 
 bot = MyBot(
