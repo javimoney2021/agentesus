@@ -1,4 +1,5 @@
 import asyncio
+from core.activity import record
 import io
 from datetime import datetime, timedelta, timezone
 from urllib.parse import unquote, urlparse
@@ -126,6 +127,7 @@ async def files_from_r2_urls(urls):
 
     async with aiohttp.ClientSession() as session:
         for url in urls:
+            record('r2.download')
             try:
                 async with session.get(url) as resp:
                     if resp.status == 200:
@@ -141,6 +143,7 @@ async def files_from_r2_urls(urls):
 
 
 async def send_post_to_channel(channel, content, attachment_urls):
+    record('discord.post_send')
     files = await files_from_r2_urls(attachment_urls)
     if files:
         return await channel.send(content=content or "", files=files)
@@ -157,6 +160,7 @@ def is_editable_post_message(message: discord.Message, bot_user_id: int) -> bool
 
 async def add_post_reactions(message: discord.Message, post_label):
     for emoji in POST_REACTION_EMOJIS:
+        record('discord.reaction')
         try:
             await message.add_reaction(emoji)
         except Exception as error:
@@ -1209,6 +1213,12 @@ async def publish_due_posts(bot):
     ]
 
     for post in posts_to_publish:
+        if post.get('retry_at') and post['retry_at'] > now_utc:
+            continue
+        if post.get('delivered_message_id'):
+            await delete_scheduled_post(post['id'])
+            SCHEDULED_POSTS_CACHE.remove(post)
+            continue
         published = False
         guild = bot.get_guild(post["guild_id"])
         if guild:
@@ -1217,6 +1227,7 @@ async def publish_due_posts(bot):
                 try:
                     sent_message = await send_post_to_channel(channel, post["content"] or "", post.get("attachment_urls"))
                     published = True
+                    post['delivered_message_id'] = sent_message.id
 
                     await add_post_reactions(sent_message, post["id"])
 
@@ -1242,7 +1253,9 @@ async def publish_due_posts(bot):
                 SCHEDULED_POSTS_CACHE.remove(post)
             continue
 
+        record('posts.delivery_failed')
         post["publish_attempts"] = post.get("publish_attempts", 0) + 1
+        post['retry_at'] = now_utc + timedelta(minutes=min(60, 5 * post['publish_attempts']))
         if post["publish_attempts"] < MAX_PUBLISH_ATTEMPTS:
             print(
                 f"⏳ Reintentando post agendado {post['id']} en el próximo ciclo "
@@ -1250,11 +1263,7 @@ async def publish_due_posts(bot):
             )
             continue
 
-        print(f"🗑️ Post agendado {post['id']} falló {MAX_PUBLISH_ATTEMPTS} veces. Se eliminará.")
-        bot.loop.create_task(cleanup_r2_after_delay(post.get("attachment_urls")))
-        await delete_scheduled_post(post["id"])
-        if post in SCHEDULED_POSTS_CACHE:
-            SCHEDULED_POSTS_CACHE.remove(post)
+        print(f"Post {post['id']} sigue pendiente; reintento espaciado, adjuntos conservados.")
 
 
 def setup(bot):

@@ -1,4 +1,5 @@
 import asyncio
+from core.activity import record
 
 import asyncpg
 
@@ -135,8 +136,9 @@ async def init_db():
         new_pool = None
         if previous_pool is not None:
             try:
-                await previous_pool.close()
+                await asyncio.wait_for(previous_pool.close(), timeout=10)
             except Exception as error:
+                previous_pool.terminate()
                 print(f"⚠️ No se pudo cerrar el pool anterior de PostgreSQL: {error}")
 
         print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
@@ -144,10 +146,10 @@ async def init_db():
     except Exception as e:
         if new_pool is not None:
             try:
-                await new_pool.close()
+                await asyncio.wait_for(new_pool.close(), timeout=10)
             except Exception:
-                pass
-        print(f"❌ Error conectando a la DB: {e}")
+                new_pool.terminate()
+        print(f"Error conectando a PostgreSQL: {type(e).__name__}")
         return False
 
 
@@ -156,22 +158,20 @@ async def heartbeat_db() -> bool:
     global bot_pool
 
     async with _heartbeat_lock:
+        record('db.healthcheck')
         pool = bot_pool
         if pool is not None:
             try:
-                async with pool.acquire() as conn:
-                    await conn.fetchval("SELECT 1")
+                async with pool.acquire(timeout=10) as conn:
+                    await conn.fetchval("SELECT 1", timeout=10)
                 return True
             except Exception as error:
-                print(f"⚠️ PostgreSQL no respondió al heartbeat: {error}")
-                if bot_pool is pool:
-                    bot_pool = None
-                try:
-                    await pool.close()
-                except Exception:
-                    pass
+                record('db.healthcheck_failed')
+                print(f"PostgreSQL healthcheck: {type(error).__name__}; se reintentara.")
+                return False
 
         print("🔄 Intentando reconectar PostgreSQL...")
+        record('db.connect_attempt')
         return await init_db()
 
 

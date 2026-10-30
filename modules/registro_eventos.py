@@ -11,6 +11,7 @@ from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
 from core import database
+from core.activity import record
 from core.config import (
     EVENT_ADMIN_ROLE_ID,
     EVENT_ALLOWED_CHANNEL_IDS,
@@ -32,6 +33,7 @@ SPATIAL_ID_PATTERN = re.compile(r"^\d{7,10}$")
 DISCORD_ID_PATTERN = re.compile(r"^\d{17,20}$")
 USERS_PER_PAGE = 10
 PARTICIPANTS_PER_EMBED = 15
+PARTICIPANTS_PAGE_SIZE = 10
 EDIT_USERS_PER_PAGE = 20
 BLACKLIST_MAX_ITEMS = 12
 STAFF_PANEL_THUMBNAIL_URL = (
@@ -163,6 +165,42 @@ async def send_ephemeral(interaction: discord.Interaction, content=None, **kwarg
     if interaction.response.is_done():
         return await interaction.followup.send(content, **kwargs)
     return await interaction.response.send_message(content, **kwargs)
+
+
+async def retry_discord_rate_limit(operation, *, action: str):
+    """Leave protocol retries to discord.py; never replay a rejected callback."""
+    record('discord.participants_operation')
+    try:
+        return await operation()
+    except discord.HTTPException as error:
+        record('discord.' + str(error.status))
+        logger.warning('Discord operation=%s status=%s; no additional retry', action, error.status)
+        raise
+
+
+def participants_embed(event, participants, page: int) -> discord.Embed:
+    total_pages = max(1, -(-len(participants) // PARTICIPANTS_PAGE_SIZE))
+    start = page * PARTICIPANTS_PAGE_SIZE
+    chunk = participants[start:start + PARTICIPANTS_PAGE_SIZE]
+    lines = [
+        f"**{row['position']}.** <@{row['user_id']}> | "
+        f"{row['nickname']} | ID: {row['external_id']} | Pais: {row['country']}"
+        + (" ❎" if row["is_overflow"] else "")
+        for row in chunk
+    ]
+    embed = discord.Embed(
+        title=f"Participantes - {event['event_name']}",
+        description="\n".join(lines),
+        color=discord.Color.blue(),
+    )
+    embed.set_thumbnail(url=PARTICIPANTS_THUMBNAIL_URL)
+    embed.set_footer(
+        text=(
+            f"Total de inscritos: {len(participants)} | "
+            f"Página {page + 1}/{total_pages}"
+        )
+    )
+    return embed
 
 
 def opening_embed(description: str, confirmation: bool = False) -> discord.Embed:
@@ -987,10 +1025,68 @@ class EventUsersPaginator(AdminOwnerView):
         await self.manager.change_database_page(interaction, self.owner_id, self.page + 1)
 
 
+class ParticipantsPaginator(OwnerView):
+    def __init__(self, owner_id: int, event, participants, page: int = 0):
+        super().__init__(owner_id)
+        self.event = event
+        self.participants = participants
+        self.page = page
+        self.total_pages = max(1, -(-len(participants) // PARTICIPANTS_PAGE_SIZE))
+        self.navigation_lock = asyncio.Lock()
+        self.previous.disabled = page <= 0
+        self.next.disabled = page >= self.total_pages - 1
+
+    async def change_page(self, interaction: discord.Interaction, page: int):
+        if page < 0 or page >= self.total_pages:
+            return
+
+        if self.navigation_lock.locked():
+            try:
+                await interaction.response.defer()
+            except discord.HTTPException:
+                pass
+            return
+
+        async with self.navigation_lock:
+            try:
+                await retry_discord_rate_limit(
+                    lambda: interaction.response.defer(),
+                    action="confirmar cambio de página de participantes",
+                )
+                view = ParticipantsPaginator(
+                    self.owner_id,
+                    self.event,
+                    self.participants,
+                    page,
+                )
+                await retry_discord_rate_limit(
+                    lambda: interaction.edit_original_response(
+                        embed=participants_embed(self.event, self.participants, page),
+                        view=view,
+                        allowed_mentions=discord.AllowedMentions.none(),
+                    ),
+                    action="cambiar página de participantes",
+                )
+            except discord.HTTPException as error:
+                logger.warning(
+                    "No se pudo cambiar la página de participantes (HTTP %s).",
+                    error.status,
+                )
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.change_page(interaction, self.page - 1)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.secondary)
+    async def next(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.change_page(interaction, self.page + 1)
+
+
 class RegistroEventos:
     def __init__(self, bot):
         self.bot = bot
         self.registration_locks: dict[tuple[int, int], asyncio.Lock] = {}
+        self.participant_panel_locks: dict[tuple[int, int], asyncio.Lock] = {}
         self.finishing_guilds: set[int] = set()
         self.background_tasks: set[asyncio.Task] = set()
 
@@ -1523,32 +1619,72 @@ class RegistroEventos:
     async def show_participants(self, interaction: discord.Interaction):
         if not interaction.guild or not await self.require_database(interaction):
             return
-        event = await database.get_active_event(interaction.guild.id)
-        if not event:
-            await send_ephemeral(interaction, "No hay eventos activos.")
-            return
-        participants = await database.get_event_participants(event["id"])
-        if not participants:
-            await send_ephemeral(interaction, "Este evento aun no tiene participantes.")
+
+        key = (interaction.guild.id, interaction.user.id)
+        lock = self.participant_panel_locks.setdefault(key, asyncio.Lock())
+        if lock.locked():
+            await send_ephemeral(
+                interaction,
+                "La lista de participantes ya se está preparando. Espera un momento.",
+            )
             return
 
-        await interaction.response.defer(ephemeral=True)
-        for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
-            chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
-            lines = [
-                f"**{row['position']}.** <@{row['user_id']}> | "
-                f"{row['nickname']} | ID: {row['external_id']} | Pais: {row['country']}"
-                + (" ❎" if row["is_overflow"] else "")
-                for row in chunk
-            ]
-            embed = discord.Embed(
-                title=f"Participantes - {event['event_name']}",
-                description="\n".join(lines),
-                color=discord.Color.blue(),
+        await lock.acquire()
+        try:
+            await retry_discord_rate_limit(
+                lambda: interaction.response.defer(ephemeral=True, thinking=True),
+                action="preparar lista de participantes",
             )
-            embed.set_thumbnail(url=PARTICIPANTS_THUMBNAIL_URL)
-            embed.set_footer(text=f"Total de inscritos: {len(participants)}")
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            event = await database.get_active_event(interaction.guild.id)
+            if not event:
+                await retry_discord_rate_limit(
+                    lambda: interaction.edit_original_response(
+                        content="No hay eventos activos.",
+                        embed=None,
+                        view=None,
+                    ),
+                    action="informar que no hay eventos activos",
+                )
+                return
+
+            participants = await database.get_event_participants(event["id"])
+            if not participants:
+                await retry_discord_rate_limit(
+                    lambda: interaction.edit_original_response(
+                        content="Este evento aun no tiene participantes.",
+                        embed=None,
+                        view=None,
+                    ),
+                    action="informar que no hay participantes",
+                )
+                return
+
+            await retry_discord_rate_limit(
+                lambda: interaction.edit_original_response(
+                    embed=participants_embed(event, participants, 0),
+                    view=ParticipantsPaginator(interaction.user.id, event, participants),
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ),
+                action="mostrar participantes",
+            )
+        except discord.HTTPException as error:
+            logger.warning(
+                "No se pudo responder con participantes (HTTP %s).",
+                error.status,
+            )
+        except Exception:
+            logger.exception("No se pudo preparar la lista de participantes.")
+            try:
+                await interaction.edit_original_response(
+                    content="No se pudo consultar la lista de participantes. Intenta de nuevo.",
+                    embed=None,
+                    view=None,
+                )
+            except discord.HTTPException:
+                pass
+        finally:
+            lock.release()
+            self.participant_panel_locks.pop(key, None)
 
     async def close_registration(self, interaction: discord.Interaction):
         if not interaction.guild or not await self.require_database(interaction):

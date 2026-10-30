@@ -3,6 +3,7 @@ import uuid
 from pathlib import Path
 
 import boto3
+from core.activity import record
 
 from core.config import (
     R2_ACCESS_KEY,
@@ -23,6 +24,7 @@ r2_client = boto3.client(
 
 
 async def upload_to_r2(file_bytes: bytes, filename: str) -> str:
+    record('r2.upload')
     ext = Path(filename).suffix
     unique_key = f"adjuntos/{uuid.uuid4().hex}{ext}"
 
@@ -39,6 +41,7 @@ async def upload_to_r2(file_bytes: bytes, filename: str) -> str:
 
 
 async def delete_from_r2(url: str):
+    record('r2.delete')
     try:
         key = url.replace(f"{R2_PUBLIC_URL}/", "")
         loop = asyncio.get_event_loop()
