@@ -1,6 +1,8 @@
 """Bounded operational counters; never record payloads or credentials."""
 import logging
 import time
+from contextlib import contextmanager
+from uuid import uuid4
 from collections import Counter, deque
 
 
@@ -8,6 +10,24 @@ logger = logging.getLogger(__name__)
 counts = Counter()
 recent = {}
 alerts = {}
+
+
+@contextmanager
+def operation_stage(kind):
+    """Emit boundaries immediately, even if the process dies before report()."""
+    operation_id = uuid4().hex[:12]
+    started = time.monotonic()
+    logger.debug('OP start id=%s stage=%s', operation_id, kind)
+    try:
+        yield
+    except BaseException as error:
+        logger.warning('OP failed id=%s stage=%s elapsed=%.2fs type=%s status=%s',
+                       operation_id, kind, time.monotonic() - started,
+                       type(error).__name__, getattr(error, 'status', None))
+        raise
+    else:
+        logger.debug('OP done id=%s stage=%s elapsed=%.2fs',
+                     operation_id, kind, time.monotonic() - started)
 
 
 def record(kind):

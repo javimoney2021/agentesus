@@ -7,14 +7,33 @@ from core.config import DATABASE_URL
 
 
 bot_pool = None
+_db_ready = False
 _heartbeat_lock = asyncio.Lock()
+_health_failures = 0
+_POOL_REBUILD_AFTER_FAILURES = 2
+
+
+def is_ready() -> bool:
+    """La app solo debe consultar la DB si el pool existe y respondió."""
+    return _db_ready and bot_pool is not None
+
+
+async def _close_pool(pool) -> None:
+    try:
+        await asyncio.wait_for(pool.close(), timeout=10)
+    except Exception:
+        try:
+            pool.terminate()
+        except Exception:
+            pass
 
 
 async def init_db():
-    global bot_pool
+    global bot_pool, _db_ready
     new_pool = None
     if not DATABASE_URL:
         print("❌ Error conectando a la DB: falta DATABASE_URL.")
+        _db_ready = False
         return False
 
     try:
@@ -26,136 +45,36 @@ async def init_db():
             timeout=20,
         )
         async with new_pool.acquire() as conn:
-            await conn.execute("""
-                CREATE TABLE IF NOT EXISTS registros (
-                    user_id BIGINT PRIMARY KEY,
-                    discord_tag TEXT NOT NULL,
-                    nickname TEXT NOT NULL,
-                    external_id TEXT NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS scheduled_posts (
-                    id SERIAL PRIMARY KEY,
-                    guild_id BIGINT NOT NULL,
-                    channel_id BIGINT NOT NULL,
-                    title TEXT,
-                    content TEXT,
-                    attachment_urls TEXT[],
-                    scheduled_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    author_id BIGINT NOT NULL,
-                    thread_name TEXT DEFAULT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-                CREATE TABLE IF NOT EXISTS event_catalog (
-                    id SERIAL PRIMARY KEY,
-                    guild_id BIGINT NOT NULL,
-                    name TEXT NOT NULL,
-                    name_key TEXT NOT NULL,
-                    created_by BIGINT NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (guild_id, name_key)
-                );
-                CREATE TABLE IF NOT EXISTS event_users (
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-                    discord_tag TEXT NOT NULL,
-                    nickname TEXT NOT NULL,
-                    external_id TEXT NOT NULL,
-                    country TEXT NOT NULL,
-                    retain_profile BOOLEAN NOT NULL DEFAULT TRUE,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (guild_id, user_id),
-                    UNIQUE (guild_id, external_id)
-                );
-                CREATE TABLE IF NOT EXISTS event_blacklist (
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT,
-                    external_id TEXT NOT NULL,
-                    created_by BIGINT NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (guild_id, external_id)
-                );
-                ALTER TABLE event_blacklist
-                    ADD COLUMN IF NOT EXISTS user_id BIGINT;
-                UPDATE event_blacklist AS blacklist
-                SET user_id = users.user_id
-                FROM event_users AS users
-                WHERE blacklist.guild_id = users.guild_id
-                  AND blacklist.external_id = users.external_id
-                  AND blacklist.user_id IS NULL;
-                CREATE UNIQUE INDEX IF NOT EXISTS event_blacklist_guild_user_uidx
-                    ON event_blacklist (guild_id, user_id)
-                    WHERE user_id IS NOT NULL;
-                CREATE TABLE IF NOT EXISTS event_instances (
-                    id SERIAL PRIMARY KEY,
-                    guild_id BIGINT NOT NULL,
-                    catalog_event_id INTEGER NOT NULL REFERENCES event_catalog(id) ON DELETE RESTRICT,
-                    event_name TEXT NOT NULL,
-                    participant_limit INTEGER NOT NULL CHECK (participant_limit IN (0, 10, 15, 20)),
-                    status TEXT NOT NULL CHECK (status IN ('open', 'closed')),
-                    registration_channel_id BIGINT NOT NULL,
-                    registration_message_id BIGINT,
-                    created_by BIGINT NOT NULL,
-                    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    closed_at TIMESTAMP WITH TIME ZONE
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS one_active_event_per_guild
-                    ON event_instances (guild_id)
-                    WHERE status IN ('open', 'closed');
-                CREATE TABLE IF NOT EXISTS event_registrations (
-                    event_id INTEGER NOT NULL REFERENCES event_instances(id) ON DELETE CASCADE,
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-                    position INTEGER NOT NULL,
-                    is_overflow BOOLEAN NOT NULL DEFAULT FALSE,
-                    registered_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-                    PRIMARY KEY (event_id, user_id),
-                    UNIQUE (event_id, position),
-                    FOREIGN KEY (guild_id, user_id)
-                        REFERENCES event_users(guild_id, user_id) ON DELETE RESTRICT
-                );
-                CREATE TABLE IF NOT EXISTS data_deletion_cooldowns (
-                    guild_id BIGINT NOT NULL,
-                    user_id BIGINT NOT NULL,
-                    requested_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    can_register_at TIMESTAMP WITH TIME ZONE NOT NULL,
-                    PRIMARY KEY (guild_id, user_id)
-                );
-                ALTER TABLE event_users
-                    ADD COLUMN IF NOT EXISTS retain_profile BOOLEAN NOT NULL DEFAULT TRUE;
-            """)
-        async with new_pool.acquire() as conn:
-            await conn.execute("""
-                ALTER TABLE scheduled_posts ADD COLUMN IF NOT EXISTS thread_name TEXT DEFAULT NULL;
-            """)
+            schema_ready = await conn.fetchval(
+                "SELECT to_regclass('registros') IS NOT NULL"
+            )
 
         previous_pool = bot_pool
         bot_pool = new_pool
         new_pool = None
         if previous_pool is not None:
-            try:
-                await asyncio.wait_for(previous_pool.close(), timeout=10)
-            except Exception as error:
-                previous_pool.terminate()
-                print(f"⚠️ No se pudo cerrar el pool anterior de PostgreSQL: {error}")
+            await _close_pool(previous_pool)
 
-        print("✅ Conexion a PostgreSQL exitosa y tablas verificadas.")
+        _db_ready = True
+        if schema_ready:
+            print("✅ Conexion a PostgreSQL exitosa.")
+        else:
+            print(
+                "⚠️ Conexion a PostgreSQL exitosa, pero falta el esquema. "
+                "Ejecuta `python scripts/migrate.py`."
+            )
         return True
     except Exception as e:
+        _db_ready = False
         if new_pool is not None:
-            try:
-                await asyncio.wait_for(new_pool.close(), timeout=10)
-            except Exception:
-                new_pool.terminate()
+            await _close_pool(new_pool)
         print(f"Error conectando a PostgreSQL: {type(e).__name__}")
         return False
 
 
 async def heartbeat_db() -> bool:
-    """Comprueba PostgreSQL y reconstruye el pool tras una desconexion."""
-    global bot_pool
+    """Comprueba PostgreSQL y reconstruye el pool tras fallos repetidos."""
+    global bot_pool, _db_ready, _health_failures
 
     async with _heartbeat_lock:
         record('db.healthcheck')
@@ -164,14 +83,28 @@ async def heartbeat_db() -> bool:
             try:
                 async with pool.acquire(timeout=10) as conn:
                     await conn.fetchval("SELECT 1", timeout=10)
-                return True
             except Exception as error:
+                _health_failures += 1
+                _db_ready = False
                 record('db.healthcheck_failed')
-                print(f"PostgreSQL healthcheck: {type(error).__name__}; se reintentara.")
-                return False
+                print(
+                    "PostgreSQL healthcheck: "
+                    f"{type(error).__name__}; fallo {_health_failures}/"
+                    f"{_POOL_REBUILD_AFTER_FAILURES}."
+                )
+                if _health_failures < _POOL_REBUILD_AFTER_FAILURES:
+                    return False
+                print("🔄 Reconstruyendo el pool de PostgreSQL...")
+                await _close_pool(pool)
+                bot_pool = None
+            else:
+                _health_failures = 0
+                _db_ready = True
+                return True
 
         print("🔄 Intentando reconectar PostgreSQL...")
         record('db.connect_attempt')
+        _health_failures = 0
         return await init_db()
 
 
@@ -185,11 +118,17 @@ async def get_all_registros():
         return await conn.fetch("SELECT * FROM registros ORDER BY updated_at DESC")
 
 
-async def get_by_external_id(external_id: str):
+async def get_by_external_id(external_id: str, limit: int = 10):
     async with bot_pool.acquire() as conn:
         return await conn.fetch(
-            "SELECT * FROM registros WHERE external_id=$1 ORDER BY updated_at DESC",
-            external_id
+            """
+            SELECT * FROM registros
+            WHERE external_id=$1
+            ORDER BY updated_at DESC
+            LIMIT $2
+            """,
+            external_id,
+            limit,
         )
 
 
@@ -427,29 +366,6 @@ async def remove_event_blacklist(guild_id: int, external_id: str):
             """, guild_id, external_id)
 
 
-async def is_event_blacklisted(
-    guild_id: int,
-    external_id: str | None,
-    user_id: int,
-) -> bool:
-    return await get_event_blacklist_match(guild_id, external_id, user_id) is not None
-
-
-async def get_event_blacklist_match(
-    guild_id: int,
-    external_id: str | None,
-    user_id: int,
-):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetchrow("""
-            SELECT * FROM event_blacklist
-            WHERE guild_id=$1
-              AND (external_id=$2 OR user_id=$3)
-            ORDER BY (user_id=$3) DESC
-            LIMIT 1
-        """, guild_id, external_id, user_id)
-
-
 async def update_event_user_profile(
     guild_id: int,
     user_id: int,
@@ -563,14 +479,6 @@ async def get_event_registration(event_id: int, user_id: int):
         """, event_id, user_id)
 
 
-async def get_event_participant_count(event_id: int):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetchval(
-            "SELECT COUNT(*) FROM event_registrations WHERE event_id=$1",
-            event_id,
-        )
-
-
 async def register_event_participant(
     guild_id: int,
     user_id: int,
@@ -584,31 +492,38 @@ async def register_event_participant(
         async with conn.transaction():
             await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", guild_id)
             event = await conn.fetchrow("""
-                SELECT * FROM event_instances
-                WHERE guild_id=$1 AND status IN ('open', 'closed')
+                SELECT
+                    instances.*,
+                    (
+                        SELECT cooldowns.can_register_at
+                        FROM data_deletion_cooldowns AS cooldowns
+                        WHERE cooldowns.guild_id=$1
+                          AND cooldowns.user_id=$2
+                          AND cooldowns.can_register_at>CURRENT_TIMESTAMP
+                    ) AS cooldown_until
+                FROM event_instances AS instances
+                WHERE instances.guild_id=$1
+                  AND instances.status IN ('open', 'closed')
+                ORDER BY instances.id DESC
                 LIMIT 1
                 FOR UPDATE
-            """, guild_id)
+            """, guild_id, user_id)
             if not event:
                 return "no_event", None
             if event["status"] != "open":
                 return "closed", None
+            if event["cooldown_until"] is not None:
+                return "cooldown", {"can_register_at": event["cooldown_until"]}
 
-            cooldown = await conn.fetchrow("""
-                SELECT can_register_at
-                FROM data_deletion_cooldowns
-                WHERE guild_id=$1 AND user_id=$2
-                  AND can_register_at>CURRENT_TIMESTAMP
-            """, guild_id, user_id)
-            if cooldown:
-                return "cooldown", cooldown
-
-            existing_registration = await conn.fetchrow("""
-                SELECT * FROM event_registrations
-                WHERE event_id=$1 AND user_id=$2
+            registration_state = await conn.fetchrow("""
+                SELECT
+                    COUNT(*)::INTEGER AS participant_count,
+                    COUNT(*) FILTER (WHERE user_id=$2) > 0 AS already_registered
+                FROM event_registrations
+                WHERE event_id=$1
             """, event["id"], user_id)
-            if existing_registration:
-                return "duplicate", existing_registration
+            if registration_state["already_registered"]:
+                return "duplicate", None
 
             profile = await conn.fetchrow("""
                 SELECT * FROM event_users WHERE guild_id=$1 AND user_id=$2
@@ -627,24 +542,18 @@ async def register_event_participant(
                 return "blacklisted", None
 
             if profile is None:
-                duplicate_external_id = await conn.fetchval("""
-                    SELECT EXISTS(
-                        SELECT 1 FROM event_users
-                        WHERE guild_id=$1 AND external_id=$2
-                    )
-                """, guild_id, external_id)
-                if duplicate_external_id:
-                    return "external_id_duplicate", None
-
                 profile = await conn.fetchrow("""
                     INSERT INTO event_users (
                         guild_id, user_id, discord_tag, nickname, external_id, country,
                         retain_profile
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    ON CONFLICT (guild_id, external_id) DO NOTHING
                     RETURNING *
                 """, guild_id, user_id, discord_tag, nickname, external_id, country,
                      retain_profile)
+                if profile is None:
+                    return "external_id_duplicate", None
             else:
                 await conn.execute("""
                     UPDATE event_users
@@ -652,11 +561,7 @@ async def register_event_participant(
                     WHERE guild_id=$1 AND user_id=$2
                 """, guild_id, user_id, discord_tag)
 
-            participant_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM event_registrations WHERE event_id=$1",
-                event["id"],
-            )
-            position = participant_count + 1
+            position = registration_state["participant_count"] + 1
             is_overflow = (
                 event["participant_limit"] > 0
                 and position > event["participant_limit"]
@@ -675,23 +580,68 @@ async def register_event_participant(
             }
 
 
-async def get_data_deletion_cooldown(guild_id: int, user_id: int):
+async def get_registration_context(
+    guild_id: int,
+    user_id: int,
+    external_id: str | None = None,
+):
+    """Reúne en una sola conexión los datos que necesita el botón Registrarse."""
     async with bot_pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute("""
-                DELETE FROM data_deletion_cooldowns
-                WHERE guild_id=$1 AND user_id=$2
-                  AND can_register_at<=CURRENT_TIMESTAMP
-            """, guild_id, user_id)
-            return await conn.fetchrow("""
-                SELECT requested_at, can_register_at
-                FROM data_deletion_cooldowns
-                WHERE guild_id=$1 AND user_id=$2
-            """, guild_id, user_id)
+        cooldown = await conn.fetchrow("""
+            SELECT requested_at, can_register_at
+            FROM data_deletion_cooldowns
+            WHERE guild_id=$1 AND user_id=$2
+              AND can_register_at>CURRENT_TIMESTAMP
+        """, guild_id, user_id)
+        profile = await conn.fetchrow("""
+            SELECT * FROM event_users WHERE guild_id=$1 AND user_id=$2
+        """, guild_id, user_id)
+        event = await conn.fetchrow("""
+            SELECT * FROM event_instances
+            WHERE guild_id=$1 AND status IN ('open', 'closed')
+            ORDER BY id DESC
+            LIMIT 1
+        """, guild_id)
+        if event is None:
+            return {
+                "cooldown": cooldown,
+                "profile": profile,
+                "event": None,
+                "registration": None,
+                "blacklist": None,
+                "participant_count": 0,
+            }
+
+        registration = await conn.fetchrow("""
+            SELECT * FROM event_registrations
+            WHERE event_id=$1 AND user_id=$2
+        """, event["id"], user_id)
+        effective_external_id = (
+            profile["external_id"] if profile is not None else external_id
+        )
+        blacklist = await conn.fetchrow("""
+            SELECT * FROM event_blacklist
+            WHERE guild_id=$1
+              AND (external_id=$2 OR user_id=$3)
+            ORDER BY (user_id=$3) DESC
+            LIMIT 1
+        """, guild_id, effective_external_id, user_id)
+        participant_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM event_registrations WHERE event_id=$1",
+            event["id"],
+        )
+        return {
+            "cooldown": cooldown,
+            "profile": profile,
+            "event": event,
+            "registration": registration,
+            "blacklist": blacklist,
+            "participant_count": participant_count,
+        }
 
 
 async def cleanup_expired_data_deletion_cooldowns():
-    if bot_pool is None:
+    if not is_ready():
         return
     async with bot_pool.acquire() as conn:
         await conn.execute("""
@@ -800,63 +750,3 @@ async def get_event_participants(event_id: int):
             WHERE r.event_id=$1
             ORDER BY r.position ASC
         """, event_id)
-
-
-async def add_scheduled_post(guild_id, channel_id, title, content, attachment_urls, scheduled_at, author_id, thread_name=None):
-    async with bot_pool.acquire() as conn:
-        row = await conn.fetchrow("""
-            INSERT INTO scheduled_posts (guild_id, channel_id, title, content, attachment_urls, scheduled_at, author_id, thread_name)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-            RETURNING id
-        """, guild_id, channel_id, title, content, attachment_urls, scheduled_at, author_id, thread_name)
-        return row["id"] if row else None
-
-
-async def get_scheduled_posts(guild_id):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM scheduled_posts WHERE guild_id=$1 ORDER BY scheduled_at ASC", guild_id)
-
-
-async def delete_scheduled_post(post_id):
-    async with bot_pool.acquire() as conn:
-        await conn.execute("DELETE FROM scheduled_posts WHERE id=$1", post_id)
-
-
-async def update_scheduled_post(post_id, title, content, attachment_urls, scheduled_at, thread_name=None):
-    async with bot_pool.acquire() as conn:
-        return await conn.fetchrow("""
-            UPDATE scheduled_posts
-            SET title=$2,
-                content=$3,
-                attachment_urls=$4,
-                scheduled_at=$5,
-                thread_name=$6
-            WHERE id=$1
-            RETURNING *
-        """, post_id, title, content, attachment_urls, scheduled_at, thread_name)
-
-
-async def get_expired_posts():
-    async with bot_pool.acquire() as conn:
-        return await conn.fetch("SELECT * FROM scheduled_posts WHERE scheduled_at <= NOW()")
-
-
-async def load_scheduled_posts(guild_id=None):
-    if bot_pool is None:
-        print("Cache de agendamientos no cargado: DB no disponible.")
-        return []
-
-    async with bot_pool.acquire() as conn:
-        if guild_id:
-            rows = await conn.fetch(
-                "SELECT * FROM scheduled_posts WHERE guild_id=$1 ORDER BY scheduled_at ASC",
-                guild_id
-            )
-        else:
-            rows = await conn.fetch(
-                "SELECT * FROM scheduled_posts ORDER BY scheduled_at ASC"
-            )
-
-    posts = [dict(r) for r in rows]
-    print(f"📦 Cache de agendamientos cargado: {len(posts)} post(s) pendiente(s).")
-    return posts

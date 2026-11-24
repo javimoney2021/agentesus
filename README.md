@@ -1,6 +1,6 @@
 # Agente SUS
 
-Bot administrativo de Discord para publicaciones e inscripciones de eventos.
+Bot administrativo de Discord para publicaciones inmediatas, edición de mensajes e inscripciones de eventos.
 
 ## Configuración relevante
 
@@ -8,23 +8,58 @@ Bot administrativo de Discord para publicaciones e inscripciones de eventos.
 - `GUILD_ID`: servidor donde se sincronizan los comandos.
 - `DATABASE_URL`: conexión PostgreSQL con TLS.
 - `DB_HEARTBEAT_HOURS`: intervalo del heartbeat de PostgreSQL; por defecto, `12`.
-
-El publicador revisa su cache cada minuto sin hacer un ping SQL. La limpieza
-de plazos se ejecuta diariamente. Los checks fallidos se reintentan con espera
-creciente hasta 30 minutos; no encienden un servicio apagado en Aiven.
-Los logs ACTIVITY resumen operaciones cada 15 minutos y alertan sobre rafagas
-(60 operaciones del mismo tipo/minuto, o 5 errores 429/reconexiones/minuto).
-Estos umbrales son diagnosticos internos, no limites oficiales de Square.
-Los contadores no incluyen todos los reintentos internos de las librerias.
-Los posts fallidos se conservan con espera creciente hasta 60 minutos.
-La proteccion de mensajes ya enviados es en memoria: aun debe persistirse para
-resolver el caso de un reinicio entre el envio a Discord y la confirmacion SQL.
 - `SUPPORT_CHANNEL_ID`: ID del canal `#soporte` autorizado para `/eliminar_datos`.
 - `STAFF_ROLES`: nombres de roles administrativos separados por comas.
-- `R2_ENDPOINT`, `R2_ACCESS_KEY`, `R2_SECRET_KEY`, `R2_BUCKET`, `R2_PUBLIC_URL`: almacenamiento temporal de adjuntos.
+- `POST_MAX_ATTACHMENTS`: máximo de adjuntos por `/post`; por defecto, `10`.
+- `POST_MAX_FILE_MB`: máximo por archivo adjunto; por defecto, `25`.
+- `POST_MAX_TOTAL_MB`: máximo de la suma de adjuntos; por defecto, `50`.
 
 El bot utiliza interacciones y modales. No requiere los intents privilegiados
 `MESSAGE_CONTENT`, `GUILD_MEMBERS` ni `GUILD_PRESENCES`.
 
-Al finalizar un evento, el bot genera en memoria una exportación `.xlsx` y la
-adjunta a la respuesta efímera del miembro autorizado antes de limpiar la lista activa.
+## Base de datos y migraciones
+
+El esquema vive en `migrations/`. `bot.py` ya no crea tablas al arrancar: solo
+abre el pool de conexiones.
+
+```bash
+python scripts/migrate.py
+```
+
+El runner aplica solo los archivos pendientes, los registra en
+`schema_migrations` y es idempotente. El `Procfile` ejecuta esa fase `release`
+antes de iniciar el worker. La migración `0002` elimina la tabla obsoleta
+`scheduled_posts`.
+
+Los índices de lectura se declaran en `0001_initial.sql`:
+`registros(external_id)`, `registros(updated_at)`,
+`event_registrations(guild_id, user_id)` y
+`event_users(guild_id, updated_at)`.
+
+El heartbeat reconstruye el pool después de dos comprobaciones fallidas y los
+comandos responden con un aviso mientras la base no esté disponible.
+
+## Publicaciones
+
+`/post` abre un selector de canal y permite publicar de inmediato mediante un
+modal con texto, adjuntos y un nombre de hilo opcional. Los adjuntos se
+descargan en streaming a un directorio temporal con límites de tamaño; el bot
+no los guarda en almacenamiento externo.
+
+`/post_edit` permite reemplazar el contenido de una publicación ya enviada por
+el bot. El sistema de publicaciones agendadas fue retirado.
+
+Los thumbnails de eventos conservan sus URLs públicas actuales.
+
+## Eventos
+
+Al finalizar un evento, el bot genera la exportación `.xlsx` en un hilo de
+ejecución aparte, publica la lista final en menos mensajes y retira los cargos
+con concurrencia limitada. La exportación solo se adjunta a la respuesta
+efímera del miembro autorizado antes de limpiar la lista activa.
+
+## Limpieza manual
+
+`scripts/cleanup_scheduled_posts.py` sigue disponible para eliminar
+`scheduled_posts` manualmente si hiciera falta. Normalmente no es necesario:
+la migración `0002` ya lo hace en cada despliegue que la tenga pendiente.

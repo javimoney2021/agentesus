@@ -33,12 +33,6 @@ if not TOKEN:
 if not GUILD_ID:
     print("⚠️ Aviso: no se encontró GUILD_ID en las variables de entorno.")
 
-R2_ENDPOINT = os.getenv("R2_ENDPOINT")
-R2_ACCESS_KEY = os.getenv("R2_ACCESS_KEY")
-R2_SECRET_KEY = os.getenv("R2_SECRET_KEY")
-R2_BUCKET = os.getenv("R2_BUCKET")
-R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")
-
 
 def env_int(name: str, default: int = 0) -> int:
     value = os.getenv(name, str(default))
@@ -46,6 +40,11 @@ def env_int(name: str, default: int = 0) -> int:
 
 
 DB_HEARTBEAT_HOURS = max(1, env_int("DB_HEARTBEAT_HOURS", 12))
+
+# Limites de adjuntos para /post. Se validan antes de descargar a disco.
+POST_MAX_ATTACHMENTS = max(1, env_int("POST_MAX_ATTACHMENTS", 10))
+POST_MAX_FILE_BYTES = max(1, env_int("POST_MAX_FILE_MB", 25)) * 1024 * 1024
+POST_MAX_TOTAL_BYTES = max(1, env_int("POST_MAX_TOTAL_MB", 50)) * 1024 * 1024
 
 
 # Registro y gestion de eventos.
@@ -97,7 +96,7 @@ def require_staff():
 async def db_unavailable(interaction: discord.Interaction) -> bool:
     from core import database
 
-    if database.bot_pool is None:
+    if not database.is_ready():
         await interaction.response.send_message(DB_NO_DISPONIBLE, ephemeral=True)
         return True
     return False

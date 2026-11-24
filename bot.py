@@ -3,6 +3,7 @@ import logging
 import time
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from core.config import DB_HEARTBEAT_HOURS, GUILD_ID, TOKEN, intents
@@ -19,9 +20,7 @@ logger = logging.getLogger(__name__)
 
 class MyBot(commands.Bot):
     async def setup_hook(self):
-        await init_db()
-        self.cache_loaded = False
-        self.db_ready = False
+        self.db_ready = await init_db()
         self.next_db_check = 0
         self.db_retry_seconds = 60
 
@@ -29,7 +28,6 @@ class MyBot(commands.Bot):
         posts.setup(self)
         registro_eventos.setup(self)
 
-        self.check_scheduled_posts_task.start()
         self.database_heartbeat_task.start()
         self.database_cleanup_task.start()
         self.activity_task.start()
@@ -50,31 +48,11 @@ class MyBot(commands.Bot):
             print("👉 Si esta lista sale vacía, tus comandos no están registrándose antes del sync.")
 
     @tasks.loop(minutes=1)
-    async def check_scheduled_posts_task(self):
-        if not self.db_ready or not self.cache_loaded:
-            return
-        try:
-            await posts.publish_due_posts(self)
-        except Exception as error:
-            record('posts.cycle_failed')
-            logger.warning('Publicador interrumpido: %s', type(error).__name__)
-            self.db_ready = False
-            self.next_db_check = time.monotonic() + 60
-
-    @check_scheduled_posts_task.before_loop
-    async def before_check(self):
-        await self.wait_until_ready()
-        await asyncio.sleep(5)
-
-    @tasks.loop(minutes=1)
     async def database_heartbeat_task(self):
         if time.monotonic() < self.next_db_check:
             return
         try:
             self.db_ready = await heartbeat_db()
-            if self.db_ready and not self.cache_loaded:
-                await posts.load_cache()
-                self.cache_loaded = True
         except Exception as error:
             self.db_ready = False
             logger.warning('Recuperacion DB: %s', type(error).__name__)
@@ -99,9 +77,7 @@ class MyBot(commands.Bot):
     @tasks.loop(minutes=15)
     async def activity_task(self):
         report()
-        logger.info('HEALTH pending_posts=%s db_ready=%s publisher_running=%s',
-                    len(posts.SCHEDULED_POSTS_CACHE), self.db_ready,
-                    self.check_scheduled_posts_task.is_running())
+        logger.info('HEALTH db_ready=%s', self.db_ready)
 
     @database_cleanup_task.before_loop
     async def before_cleanup(self):
@@ -109,8 +85,8 @@ class MyBot(commands.Bot):
         await asyncio.sleep(30)
 
     async def close(self):
-        for task in (self.check_scheduled_posts_task, self.database_heartbeat_task,
-                     self.database_cleanup_task, self.activity_task):
+        for task in (self.database_heartbeat_task, self.database_cleanup_task,
+                     self.activity_task):
             task.cancel()
         await super().close()
 
@@ -125,6 +101,27 @@ bot = MyBot(
     help_command=None,
     intents=intents,
 )
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error):
+    record('discord.command_failed')
+    if isinstance(error, app_commands.CommandInvokeError):
+        error = error.original
+    if isinstance(error, app_commands.CheckFailure):
+        return
+
+    logger.error('Comando fallido: %s', type(error).__name__, exc_info=error)
+    message = (
+        "❌ Ocurrió un error inesperado. Intenta de nuevo más tarde."
+    )
+    try:
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
+    except discord.HTTPException:
+        pass
 
 
 @bot.event

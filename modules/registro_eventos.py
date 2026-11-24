@@ -34,6 +34,8 @@ DISCORD_ID_PATTERN = re.compile(r"^\d{17,20}$")
 USERS_PER_PAGE = 10
 PARTICIPANTS_PER_EMBED = 15
 PARTICIPANTS_PAGE_SIZE = 10
+FINAL_EMBEDS_PER_MESSAGE = 5
+ROLE_REMOVAL_CONCURRENCY = 5
 EDIT_USERS_PER_PAGE = 20
 BLACKLIST_MAX_ITEMS = 12
 STAFF_PANEL_THUMBNAIL_URL = (
@@ -1091,7 +1093,7 @@ class RegistroEventos:
         self.background_tasks: set[asyncio.Task] = set()
 
     def database_ready(self) -> bool:
-        return database.bot_pool is not None
+        return database.is_ready()
 
     async def require_database(self, interaction: discord.Interaction) -> bool:
         if self.database_ready():
@@ -1271,10 +1273,11 @@ class RegistroEventos:
         if not await self.require_database(interaction):
             return
 
-        cooldown = await database.get_data_deletion_cooldown(
+        context = await database.get_registration_context(
             interaction.guild.id,
             interaction.user.id,
         )
+        cooldown = context["cooldown"]
         if cooldown:
             available_at = int(cooldown["can_register_at"].timestamp())
             await send_ephemeral(
@@ -1284,14 +1287,11 @@ class RegistroEventos:
             )
             return
 
+        profile = context["profile"]
         if has_role_id(interaction.user, EVENT_PT_ROLE_ID):
             await send_ephemeral(
                 interaction,
                 "Seu registro não pode ser realizado. Região incorreta.",
-            )
-            profile = await database.get_event_user(
-                interaction.guild.id,
-                interaction.user.id,
             )
             await self.send_registration_rejection_alert(
                 interaction.guild,
@@ -1310,7 +1310,7 @@ class RegistroEventos:
             )
             return
 
-        event = await database.get_active_event(interaction.guild.id)
+        event = context["event"]
         if not event or event["status"] != "open":
             await send_ephemeral(interaction, "Las inscripciones de este evento estan cerradas.")
             return
@@ -1324,16 +1324,11 @@ class RegistroEventos:
                 "Este panel ya no corresponde al evento activo.",
             )
             return
-        if await database.get_event_registration(event["id"], interaction.user.id):
+        if context["registration"]:
             await send_ephemeral(interaction, "Ya estas registrado en este evento.")
             return
 
-        profile = await database.get_event_user(interaction.guild.id, interaction.user.id)
-        blacklist_entry = await database.get_event_blacklist_match(
-            interaction.guild.id,
-            profile["external_id"] if profile else None,
-            interaction.user.id,
-        )
+        blacklist_entry = context["blacklist"]
         if blacklist_entry:
             await send_ephemeral(interaction, "NO PUEDES PARTICIPAR EN ESTE EVENTO!")
             await self.send_registration_rejection_alert(
@@ -1348,7 +1343,7 @@ class RegistroEventos:
             )
             return
 
-        count = await database.get_event_participant_count(event["id"])
+        count = context["participant_count"]
         overflow = event["participant_limit"] > 0 and count >= event["participant_limit"]
 
         if profile:
@@ -1464,41 +1459,10 @@ class RegistroEventos:
             )
             return
 
-        existing_profile = await database.get_event_user(guild.id, member.id)
-        effective_external_id = (
-            existing_profile["external_id"]
-            if existing_profile
-            else profile["external_id"]
-        )
-        blacklist_entry = await database.get_event_blacklist_match(
-            guild.id,
-            effective_external_id,
-            member.id,
-        )
-        if blacklist_entry:
-            await interaction.followup.send(
-                "NO PUEDES PARTICIPAR EN ESTE EVENTO!",
-                ephemeral=True,
-            )
-            await self.send_registration_rejection_alert(
-                guild,
-                member,
-                effective_external_id or blacklist_entry["external_id"],
-                "blacklist",
-            )
-            if delete_source_on_success:
-                try:
-                    await interaction.delete_original_response()
-                except (discord.NotFound, discord.HTTPException):
-                    pass
-            return
-
-        if existing_profile:
-            nickname = external_id = country = None
-        else:
-            nickname = profile["nickname"]
-            external_id = profile["external_id"]
-            country = profile["country"]
+        effective_external_id = profile["external_id"]
+        nickname = profile["nickname"]
+        external_id = profile["external_id"]
+        country = profile["country"]
 
         had_role = participant_role in member.roles
         if not had_role:
@@ -1574,6 +1538,11 @@ class RegistroEventos:
                 effective_external_id,
                 "blacklist",
             )
+            if delete_source_on_success:
+                try:
+                    await interaction.delete_original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    pass
         messages = {
             "blacklisted": "NO PUEDES PARTICIPAR EN ESTE EVENTO!",
             "external_id_duplicate": "Esa ID Espacial ya pertenece a otro usuario.",
@@ -1823,7 +1792,12 @@ class RegistroEventos:
         participants = await database.get_event_participants(event["id"])
 
         try:
-            export_file = build_event_export(event, participants, interaction.user)
+            export_file = await asyncio.to_thread(
+                build_event_export,
+                event,
+                participants,
+                interaction.user,
+            )
             await interaction.edit_original_response(
                 content=(
                     "Exportación interna generada. El archivo es visible únicamente para ti; "
@@ -1848,6 +1822,7 @@ class RegistroEventos:
 
         try:
             if participants:
+                embeds = []
                 for start in range(0, len(participants), PARTICIPANTS_PER_EMBED):
                     chunk = participants[start:start + PARTICIPANTS_PER_EMBED]
                     lines = [
@@ -1861,7 +1836,12 @@ class RegistroEventos:
                     )
                     embed.set_thumbnail(url=FINAL_PARTICIPANTS_THUMBNAIL_URL)
                     embed.set_footer(text=f"Total de participantes: {len(participants)}")
-                    await interaction.channel.send(embed=embed)
+                    embeds.append(embed)
+
+                for start in range(0, len(embeds), FINAL_EMBEDS_PER_MESSAGE):
+                    await interaction.channel.send(
+                        embeds=embeds[start:start + FINAL_EMBEDS_PER_MESSAGE]
+                    )
             else:
                 await interaction.channel.send(
                     f"**{event['event_name']}** finalizó sin participantes registrados."
@@ -1880,22 +1860,29 @@ class RegistroEventos:
 
         await asyncio.sleep(5)
         role = interaction.guild.get_role(EVENT_PARTICIPANT_ROLE_ID)
-        role_failures = 0
-        if role:
-            for row in participants:
-                member = interaction.guild.get_member(row["user_id"])
-                if member is None:
-                    try:
-                        member = await interaction.guild.fetch_member(row["user_id"])
-                    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-                        member = None
-                if member is None:
-                    role_failures += 1
-                elif role in member.roles:
-                    if not await self.remove_role_safely(member, role):
-                        role_failures += 1
-        elif participants:
+        if role is None:
             role_failures = len(participants)
+        elif participants:
+            semaphore = asyncio.Semaphore(ROLE_REMOVAL_CONCURRENCY)
+
+            async def remove_participant_role(user_id: int) -> bool:
+                member = interaction.guild.get_member(user_id)
+                async with semaphore:
+                    if member is None:
+                        try:
+                            member = await interaction.guild.fetch_member(user_id)
+                        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                            return False
+                    if role not in member.roles:
+                        return True
+                    return await self.remove_role_safely(member, role)
+
+            results = await asyncio.gather(
+                *(remove_participant_role(row["user_id"]) for row in participants)
+            )
+            role_failures = sum(1 for removed in results if not removed)
+        else:
+            role_failures = 0
 
         try:
             await database.delete_event(event["id"])

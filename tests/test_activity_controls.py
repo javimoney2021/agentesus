@@ -1,5 +1,5 @@
-import ast
 import asyncio
+import ast
 import logging
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +10,15 @@ from core import activity
 
 
 class ControlsTests(unittest.TestCase):
+    def test_stage_logs_failure_without_payload(self):
+        with self.assertLogs(activity.logger, level='DEBUG') as logs:
+            with self.assertRaises(ValueError):
+                with activity.operation_stage('test.stage'):
+                    raise ValueError('private payload')
+        self.assertIn('OP start', logs.output[0])
+        self.assertIn('OP failed', logs.output[1])
+        self.assertNotIn('private payload', str(logs.output))
+
     def test_telemetry_memory_is_bounded(self):
         for _ in range(1000):
             activity.record('test.operation')
