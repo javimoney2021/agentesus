@@ -12,7 +12,7 @@ from core.database import (
     heartbeat_db,
     init_db,
 )
-from modules import posts, registro_eventos, registros
+from modules import datos, posts, registro_eventos
 from core.activity import DiscordErrorSummary, record, report
 
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ class MyBot(commands.Bot):
         self.next_db_check = 0
         self.db_retry_seconds = 60
 
-        registros.setup(self)
+        datos.setup(self)
         posts.setup(self)
         registro_eventos.setup(self)
 

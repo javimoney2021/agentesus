@@ -2,15 +2,6 @@
 -- Todas las sentencias son idempotentes para poder marcar esta migracion
 -- como aplicada tambien en bases de datos que ya existian.
 
-CREATE TABLE IF NOT EXISTS registros (
-    user_id BIGINT PRIMARY KEY,
-    discord_tag TEXT NOT NULL,
-    nickname TEXT NOT NULL,
-    external_id TEXT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS event_catalog (
     id SERIAL PRIMARY KEY,
     guild_id BIGINT NOT NULL,
@@ -102,12 +93,6 @@ ALTER TABLE event_users
 
 -- Indices de lectura. Sin ellos, las consultas por usuario y las listas
 -- paginadas recorren tablas completas.
-CREATE INDEX IF NOT EXISTS registros_external_id_idx
-    ON registros (external_id);
-
-CREATE INDEX IF NOT EXISTS registros_updated_at_idx
-    ON registros (updated_at DESC);
-
 CREATE INDEX IF NOT EXISTS event_registrations_guild_user_idx
     ON event_registrations (guild_id, user_id);
 

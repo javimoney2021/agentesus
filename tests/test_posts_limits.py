@@ -87,8 +87,6 @@ class SchemaSafetyTests(unittest.TestCase):
     def test_migration_declares_required_indexes(self):
         sql = (ROOT / "migrations" / "0001_initial.sql").read_text(encoding="utf-8")
         for fragment in (
-            "registros (external_id)",
-            "registros (updated_at DESC)",
             "event_registrations (guild_id, user_id)",
             "event_users (guild_id, updated_at DESC)",
         ):

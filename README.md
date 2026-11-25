@@ -29,10 +29,9 @@ python scripts/migrate.py
 El runner aplica solo los archivos pendientes, los registra en
 `schema_migrations` y es idempotente. El `Procfile` ejecuta esa fase `release`
 antes de iniciar el worker. La migración `0002` elimina la tabla obsoleta
-`scheduled_posts`.
+`scheduled_posts` y la `0003` elimina `registros`.
 
 Los índices de lectura se declaran en `0001_initial.sql`:
-`registros(external_id)`, `registros(updated_at)`,
 `event_registrations(guild_id, user_id)` y
 `event_users(guild_id, updated_at)`.
 
@@ -58,20 +57,12 @@ ejecución aparte, publica la lista final en menos mensajes y retira los cargos
 con concurrencia limitada. La exportación solo se adjunta a la respuesta
 efímera del miembro autorizado antes de limpiar la lista activa.
 
-## Baúl de registros
+## Eliminación de datos
 
-- `/exportar_baul`: pide confirmación y genera un Excel con todos los registros
-  de la tabla `registros` (Nick, ID Espacial, Discord ID, usuario y fechas).
-  Las columnas usan un ancho aproximado de 5 cm y el archivo se envía de forma
-  efímera al staff que ejecuta el comando. No incluye tablas de eventos.
-- `/purgar_baul`: pide confirmación y elimina permanentemente la tabla
-  `registros` y todos sus datos/índices. No toca `event_registrations`,
-  `event_users` ni el resto del esquema de eventos. Después de la purga, los
-  comandos del baúl responden que ya fue eliminado.
-
-La purga libera la tabla en PostgreSQL; las copias de seguridad y la retención
-de WAL de Aiven se rigen por la configuración del proveedor y no se pueden
-borrar desde el bot.
+`/eliminar_datos` permite que un usuario borre su perfil de eventos y sus
+inscripciones activas desde el canal `#soporte`. La baja inicia un periodo de
+enfriamiento y no elimina entradas de blacklist ni otros controles
+administrativos justificados.
 
 ## Limpieza manual
 
