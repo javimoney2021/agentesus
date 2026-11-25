@@ -1,5 +1,13 @@
+import asyncio
+import logging
+from datetime import datetime, timezone
+from io import BytesIO
+
 import discord
 from discord import app_commands
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from core.config import (
     DATA_DELETION_COOLDOWN_DAYS,
@@ -9,11 +17,92 @@ from core.config import (
     require_staff,
 )
 from core.database import (
+    baul_table_exists,
     delete_user_data_and_start_cooldown,
     get_all_registros,
+    get_baul_count,
     get_by_external_id,
     get_registro,
+    purge_baul,
 )
+
+
+logger = logging.getLogger(__name__)
+
+BAUL_EXPORT_HEADERS = (
+    "Nick",
+    "ID Espacial",
+    "Discord ID",
+    "Usuario de Discord",
+    "Fecha de alta",
+    "Ultima actualizacion",
+)
+
+# Ancho de 5 cm por columna. Excel mide en caracteres del font por defecto:
+# px = ancho * 7 + 5, y 1 cm = 96 / 2.54 px. El resultado es aproximado.
+BAUL_COLUMN_WIDTH_CM = 5
+PX_PER_CM = 96 / 2.54
+EXCEL_CHAR_PX = 7
+EXCEL_COLUMN_PADDING_PX = 5
+EXCEL_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def cm_to_excel_width(cm: float) -> float:
+    pixels = cm * PX_PER_CM
+    return max(1.0, (pixels - EXCEL_COLUMN_PADDING_PX) / EXCEL_CHAR_PX)
+
+
+def safe_excel_text(value) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(EXCEL_FORMULA_PREFIXES):
+        return f"'{text}"
+    return text
+
+
+def build_baul_export(records) -> discord.File:
+    """Genera el Excel completo del baúl (solo tabla `registros`)."""
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Baul"
+
+    sheet.append(BAUL_EXPORT_HEADERS)
+    for cell in sheet[1]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor="374151")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for record in records:
+        sheet.append((
+            safe_excel_text(record["nickname"]),
+            safe_excel_text(record["external_id"]),
+            safe_excel_text(record["user_id"]),
+            safe_excel_text(record["discord_tag"]),
+            record["created_at"],
+            record["updated_at"],
+        ))
+        for column in (5, 6):
+            cell = sheet.cell(sheet.max_row, column)
+            if cell.value is not None:
+                cell.number_format = "dd/mm/yyyy hh:mm"
+
+    sheet.freeze_panes = "A2"
+    sheet.auto_filter.ref = f"A1:F{max(sheet.max_row, 1)}"
+    width = cm_to_excel_width(BAUL_COLUMN_WIDTH_CM)
+    for index in range(1, len(BAUL_EXPORT_HEADERS) + 1):
+        sheet.column_dimensions[get_column_letter(index)].width = width
+    for row in sheet.iter_rows(min_row=2):
+        for cell in row:
+            cell.alignment = Alignment(vertical="top")
+    sheet.row_dimensions[1].height = 22
+
+    workbook.properties.creator = "Agente SUS"
+    output = BytesIO()
+    workbook.save(output)
+    workbook.close()
+    output.seek(0)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
+    return discord.File(output, filename=f"baul_registros_{timestamp}.xlsx")
 
 
 class BaulRegistrosView(discord.ui.View):
@@ -70,12 +159,135 @@ class BaulRegistrosView(discord.ui.View):
         await interaction.response.edit_message(embed=await self.build_embed(), view=self)
 
 
+class BaulExportConfirmView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+        self.processing = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "⛔ Esta exportación pertenece a otro miembro del staff.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Exportar Excel", style=discord.ButtonStyle.success)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.processing:
+            return
+        self.processing = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        try:
+            records = await get_all_registros()
+            if not records:
+                await interaction.edit_original_response(
+                    content="ℹ️ El baúl quedó vacío; no hay nada que exportar.",
+                    embed=None,
+                    view=None,
+                )
+                self.stop()
+                return
+            export_file = await asyncio.to_thread(build_baul_export, records)
+            await interaction.edit_original_response(
+                content=f"✅ Exportación del baúl lista ({len(records)} registros).",
+                embed=None,
+                view=None,
+                attachments=[export_file],
+            )
+        except Exception:
+            logger.exception("No se pudo exportar el baúl")
+            await interaction.edit_original_response(
+                content="❌ No se pudo generar el Excel del baúl. Revisa los logs.",
+                embed=None,
+                view=None,
+                attachments=[],
+            )
+        finally:
+            self.stop()
+
+
+class BaulPurgeConfirmView(discord.ui.View):
+    def __init__(self, owner_id: int):
+        super().__init__(timeout=120)
+        self.owner_id = owner_id
+        self.processing = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "⛔ Esta purga pertenece a otro miembro del staff.",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="Purgar baúl", style=discord.ButtonStyle.danger)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.processing:
+            return
+        self.processing = True
+        for item in self.children:
+            item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+        try:
+            deleted = await purge_baul()
+        except Exception:
+            logger.exception("No se pudo purgar el baúl")
+            await interaction.edit_original_response(
+                content="❌ No se pudo purgar el baúl. Revisa los logs.",
+                embed=None,
+                view=None,
+            )
+            self.stop()
+            return
+
+        if deleted < 0:
+            message = "ℹ️ El baúl ya estaba eliminado."
+        else:
+            logger.warning(
+                "Baúl purgado por staff user_id=%s filas=%s",
+                interaction.user.id,
+                deleted,
+            )
+            message = (
+                f"✅ Baúl purgado: {deleted} registros eliminados y tabla "
+                "`registros` eliminada. Las tablas de eventos no fueron modificadas."
+            )
+        await interaction.edit_original_response(
+            content=message,
+            embed=None,
+            view=None,
+        )
+        self.stop()
+
+    @discord.ui.button(label="Cancelar", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.edit_message(
+            content="❌ Purga del baúl cancelada.",
+            embed=None,
+            view=None,
+        )
+        self.stop()
+
+
 def setup(bot):
     @bot.tree.command(name="consultar_baul", description="(Staff) Consulta un registro histórico")
     @require_staff()
     async def consultar_baul(interaction: discord.Interaction, usuario: discord.Member):
         if await db_unavailable(interaction):
             return
+        if not await baul_table_exists():
+            return await interaction.response.send_message(
+                "ℹ️ El baúl fue eliminado permanentemente.",
+                ephemeral=True,
+            )
 
         registro = await get_registro(usuario.id)
         if not registro:
@@ -95,6 +307,11 @@ def setup(bot):
     async def user_id_baul(interaction: discord.Interaction, id_espacial: str):
         if await db_unavailable(interaction):
             return
+        if not await baul_table_exists():
+            return await interaction.response.send_message(
+                "ℹ️ El baúl fue eliminado permanentemente.",
+                ephemeral=True,
+            )
 
         registros = await get_by_external_id(id_espacial.strip())
         if not registros:
@@ -122,6 +339,11 @@ def setup(bot):
     async def baul_registros(interaction: discord.Interaction):
         if await db_unavailable(interaction):
             return
+        if not await baul_table_exists():
+            return await interaction.response.send_message(
+                "ℹ️ El baúl fue eliminado permanentemente.",
+                ephemeral=True,
+            )
 
         registros = await get_all_registros()
         if not registros:
@@ -132,6 +354,74 @@ def setup(bot):
         await interaction.response.send_message(
             embed=await view.build_embed(),
             view=view,
+            ephemeral=True,
+        )
+
+    @bot.tree.command(
+        name="exportar_baul",
+        description="(Staff) Exporta todo el baúl de registros a Excel",
+    )
+    @require_staff()
+    async def exportar_baul(interaction: discord.Interaction):
+        if await db_unavailable(interaction):
+            return
+        if not await baul_table_exists():
+            return await interaction.response.send_message(
+                "ℹ️ El baúl ya fue eliminado permanentemente. No hay datos para exportar.",
+                ephemeral=True,
+            )
+
+        total = await get_baul_count()
+        if total == 0:
+            return await interaction.response.send_message(
+                "ℹ️ El baúl está vacío; no hay nada que exportar.",
+                ephemeral=True,
+            )
+
+        embed = discord.Embed(
+            title="📤 Exportar baúl",
+            description=(
+                f"Se exportarán **{total}** registros del baúl a un archivo Excel.\n\n"
+                "El archivo se enviará solo a ti en un mensaje efímero.\n"
+                "No incluye inscripciones ni perfiles de eventos."
+            ),
+            color=discord.Color.blurple(),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=BaulExportConfirmView(interaction.user.id),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(
+        name="purgar_baul",
+        description="(Staff) Elimina permanentemente el baúl de registros",
+    )
+    @require_staff()
+    async def purgar_baul(interaction: discord.Interaction):
+        if await db_unavailable(interaction):
+            return
+        if not await baul_table_exists():
+            return await interaction.response.send_message(
+                "ℹ️ El baúl ya estaba eliminado permanentemente.",
+                ephemeral=True,
+            )
+
+        total = await get_baul_count()
+        embed = discord.Embed(
+            title="⚠️ Purgar baúl completo",
+            description=(
+                f"Se eliminarán **{total}** registros y la tabla `registros` completa, "
+                "incluidos sus índices. Esta acción no se puede deshacer.\n\n"
+                "**No** se eliminarán las tablas de eventos.\n\n"
+                "Después de la purga, `/consultar_baul`, `/user_id_baul`, "
+                "`/baul_registros` y `/exportar_baul` quedarán sin datos."
+            ),
+            color=discord.Color.red(),
+        )
+        await interaction.response.send_message(
+            embed=embed,
+            view=BaulPurgeConfirmView(interaction.user.id),
             ephemeral=True,
         )
 

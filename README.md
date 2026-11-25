@@ -58,6 +58,21 @@ ejecución aparte, publica la lista final en menos mensajes y retira los cargos
 con concurrencia limitada. La exportación solo se adjunta a la respuesta
 efímera del miembro autorizado antes de limpiar la lista activa.
 
+## Baúl de registros
+
+- `/exportar_baul`: pide confirmación y genera un Excel con todos los registros
+  de la tabla `registros` (Nick, ID Espacial, Discord ID, usuario y fechas).
+  Las columnas usan un ancho aproximado de 5 cm y el archivo se envía de forma
+  efímera al staff que ejecuta el comando. No incluye tablas de eventos.
+- `/purgar_baul`: pide confirmación y elimina permanentemente la tabla
+  `registros` y todos sus datos/índices. No toca `event_registrations`,
+  `event_users` ni el resto del esquema de eventos. Después de la purga, los
+  comandos del baúl responden que ya fue eliminado.
+
+La purga libera la tabla en PostgreSQL; las copias de seguridad y la retención
+de WAL de Aiven se rigen por la configuración del proveedor y no se pueden
+borrar desde el bot.
+
 ## Limpieza manual
 
 `scripts/cleanup_scheduled_posts.py` sigue disponible para eliminar

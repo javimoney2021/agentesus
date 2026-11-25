@@ -46,7 +46,7 @@ async def init_db():
         )
         async with new_pool.acquire() as conn:
             schema_ready = await conn.fetchval(
-                "SELECT to_regclass('registros') IS NOT NULL"
+                "SELECT to_regclass('event_instances') IS NOT NULL"
             )
 
         previous_pool = bot_pool
@@ -116,6 +116,37 @@ async def get_registro(user_id):
 async def get_all_registros():
     async with bot_pool.acquire() as conn:
         return await conn.fetch("SELECT * FROM registros ORDER BY updated_at DESC")
+
+
+async def baul_table_exists() -> bool:
+    """Indica si la tabla del baúl sigue existiendo tras una purga."""
+    if not is_ready():
+        return False
+    async with bot_pool.acquire() as conn:
+        return bool(
+            await conn.fetchval("SELECT to_regclass('registros') IS NOT NULL")
+        )
+
+
+async def get_baul_count() -> int:
+    async with bot_pool.acquire() as conn:
+        return int(await conn.fetchval("SELECT COUNT(*) FROM registros") or 0)
+
+
+async def purge_baul() -> int:
+    """Elimina la tabla del baúl y devuelve las filas borradas.
+
+    Devuelve -1 si la tabla ya no existía. No toca ninguna tabla de eventos.
+    """
+    async with bot_pool.acquire() as conn:
+        exists = await conn.fetchval(
+            "SELECT to_regclass('registros') IS NOT NULL"
+        )
+        if not exists:
+            return -1
+        count = await conn.fetchval("SELECT COUNT(*) FROM registros")
+        await conn.execute("DROP TABLE IF EXISTS registros")
+        return int(count or 0)
 
 
 async def get_by_external_id(external_id: str, limit: int = 10):
@@ -700,10 +731,14 @@ async def delete_user_data_and_start_cooldown(
                 DELETE FROM event_users
                 WHERE guild_id=$1 AND user_id=$2
             """, guild_id, user_id)
-            history_result = await conn.execute(
-                "DELETE FROM registros WHERE user_id=$1",
-                user_id,
-            )
+            history_result = "DELETE 0"
+            if await conn.fetchval(
+                "SELECT to_regclass('registros') IS NOT NULL"
+            ):
+                history_result = await conn.execute(
+                    "DELETE FROM registros WHERE user_id=$1",
+                    user_id,
+                )
             deleted_count = sum(
                 int(result.rsplit(" ", 1)[-1])
                 for result in (registration_result, profile_result, history_result)
