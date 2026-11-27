@@ -34,6 +34,10 @@ DISCORD_ID_PATTERN = re.compile(r"^\d{17,20}$")
 USERS_PER_PAGE = 10
 PARTICIPANTS_PER_EMBED = 15
 PARTICIPANTS_PAGE_SIZE = 10
+RATE_LIMIT_NOTICE = (
+    "⏳ Discord limitó temporalmente la solicitud. "
+    "Espera unos segundos e intenta de nuevo."
+)
 FINAL_EMBEDS_PER_MESSAGE = 5
 ROLE_REMOVAL_CONCURRENCY = 5
 EDIT_USERS_PER_PAGE = 20
@@ -178,6 +182,23 @@ async def retry_discord_rate_limit(operation, *, action: str):
         record('discord.' + str(error.status))
         logger.warning('Discord operation=%s status=%s; no additional retry', action, error.status)
         raise
+
+
+async def send_rate_limit_notice(interaction: discord.Interaction, *, edit: bool):
+    """Completa la respuesta para no dejar la interacción muda tras un 429."""
+    try:
+        if edit:
+            await interaction.edit_original_response(
+                content=RATE_LIMIT_NOTICE,
+                embed=None,
+                view=None,
+            )
+        elif interaction.response.is_done():
+            await interaction.followup.send(RATE_LIMIT_NOTICE, ephemeral=True)
+        else:
+            await interaction.response.send_message(RATE_LIMIT_NOTICE, ephemeral=True)
+    except (discord.HTTPException, discord.InteractionError):
+        logger.warning("No se pudo avisar del limite de Discord al usuario.")
 
 
 def participants_embed(event, participants, page: int) -> discord.Embed:
@@ -1050,19 +1071,16 @@ class ParticipantsPaginator(OwnerView):
             return
 
         async with self.navigation_lock:
+            view = ParticipantsPaginator(
+                self.owner_id,
+                self.event,
+                self.participants,
+                page,
+            )
             try:
+                # Un solo request: edita el mensaje del componente sin defer previo.
                 await retry_discord_rate_limit(
-                    lambda: interaction.response.defer(),
-                    action="confirmar cambio de página de participantes",
-                )
-                view = ParticipantsPaginator(
-                    self.owner_id,
-                    self.event,
-                    self.participants,
-                    page,
-                )
-                await retry_discord_rate_limit(
-                    lambda: interaction.edit_original_response(
+                    lambda: interaction.response.edit_message(
                         embed=participants_embed(self.event, self.participants, page),
                         view=view,
                         allowed_mentions=discord.AllowedMentions.none(),
@@ -1074,6 +1092,7 @@ class ParticipantsPaginator(OwnerView):
                     "No se pudo cambiar la página de participantes (HTTP %s).",
                     error.status,
                 )
+                await send_rate_limit_notice(interaction, edit=False)
 
     @discord.ui.button(label="◀", style=discord.ButtonStyle.secondary)
     async def previous(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1640,6 +1659,16 @@ class RegistroEventos:
             logger.warning(
                 "No se pudo responder con participantes (HTTP %s).",
                 error.status,
+            )
+            retry_after = getattr(error, "retry_after", None)
+            if retry_after:
+                try:
+                    await asyncio.sleep(min(float(retry_after), 3.0))
+                except (TypeError, ValueError):
+                    pass
+            await send_rate_limit_notice(
+                interaction,
+                edit=interaction.response.is_done(),
             )
         except Exception:
             logger.exception("No se pudo preparar la lista de participantes.")
